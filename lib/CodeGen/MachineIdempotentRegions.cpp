@@ -128,7 +128,7 @@ void MachineIdempotentRegions::getRegionsContaining(
   std::vector<IdempotentRegion *> *Regions) {
 
   // Clear the return argument.
-  //Regions->clear();
+  Regions->clear();
 
   // Walk the CFG backwards, starting at the instruction before MI.
   typedef std::pair<MachineBasicBlock::const_reverse_iterator,
@@ -146,14 +146,15 @@ void MachineIdempotentRegions::getRegionsContaining(
       continue;
 
     const MachineBasicBlock *MBB = It->getParent();
+    Visited.insert(MBB);
 
-    // Look for a region entry or the block entry, whichever comes first. 
+    // Look for a region entry or the block entry, whichever comes first.
     while (It != end && !isRegionEntry(*It))
       It++;
 
     // If we found a region entry, add the region and skip predecessors.
     if (It != end) {
-      Regions->push_back(nullptr/*&getRegionAtEntry(*It)*/);
+      Regions->push_back(&getRegionAtEntry(*It));
       continue;
     }
 

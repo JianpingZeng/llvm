@@ -1100,7 +1100,7 @@ void RegisterRenaming::insertMoveAndBoundary(AntiDepPair &pair,
   MachineBasicBlock *mbb = 0;
 
   // Find the candiate insertion positions.
-  std::set<MachineInstr *> candidateInsertPos;
+/*  std::set<MachineInstr *> candidateInsertPos;
   std::set<MachineBasicBlock *> visited;
   getCandidatePosForBoundaryInsert(useMI, candidateInsertPos, visited);
 
@@ -1124,7 +1124,8 @@ void RegisterRenaming::insertMoveAndBoundary(AntiDepPair &pair,
   // after use MI.
 
   // Inserts a poir of boundary and move instrs at each insertion point.
-  auto pos = optInsertedPos[0];
+  auto pos = optInsertedPos[0];*/
+  auto pos = useMI;
   IDEM_DEBUG(llvm::errs() << "Inserted position:\n";
                  llvm::errs() << li->mi2Idx[pos] << ": ";
                  pos->dump(););
@@ -1761,7 +1762,23 @@ bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
   }while (true);
 
   // FIXME, cleanup is needed for transforming some incorrect code into normal status.
-  bool localChanged;
+  for (auto &mbb : sequence) {
+    auto mi = mbb->instr_begin();
+    auto mie = mbb->instr_end();
+    for (; mi != mie; ++mi) {
+      assert(li->mi2Idx.count(mi));
+
+      // Step#3: collects reg definition information.
+      // Step#4: collects reg uses information.
+      std::vector<IdempotentRegion *> Regions(20);
+      regions->getRegionsContaining(*mi, &Regions);
+      collectRefDefUseInfo(mi, &Regions);
+    }
+  }
+
+  // If there is not antiDeps exist, just early break from do loop.
+  assert(antiDeps.empty() && "There are anti-dependences remained!");
+/*  bool localChanged;
   do {
     localChanged = scavengerIdem();
     changed |= localChanged;
@@ -1769,9 +1786,22 @@ bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
 
   changed |= localChanged;
 
-  // If we are not going to clear the antiDeps, there is an item
-  // remained produced by previous running of this pass.
-  // I don't know why???
+  for (auto &mbb : sequence) {
+    auto mi = mbb->instr_begin();
+    auto mie = mbb->instr_end();
+    for (; mi != mie; ++mi) {
+      assert(li->mi2Idx.count(mi));
+
+      // Step#3: collects reg definition information.
+      // Step#4: collects reg uses information.
+      std::vector<IdempotentRegion *> Regions(20);
+      regions->getRegionsContaining(*mi, &Regions);
+      collectRefDefUseInfo(mi, &Regions);
+    }
+  }
+
+  // If there is not antiDeps exist, just early break from do loop.
+  assert(antiDeps.empty() && "There are anti-dependences remained!");*/
 
   return changed;
 }
