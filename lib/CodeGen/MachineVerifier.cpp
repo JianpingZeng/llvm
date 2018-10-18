@@ -301,6 +301,16 @@ bool MachineVerifier::runOnMachineFunction(MachineFunction &MF) {
   for (MachineFunction::const_iterator MFI = MF.begin(), MFE = MF.end();
        MFI!=MFE; ++MFI) {
     visitMachineBasicBlockBefore(MFI);
+
+    if (MFI->getName() == "if.then") {
+      llvm::errs() << " with live-ins: [";
+      for (DenseSet<unsigned>::iterator I = regsLive.begin(),
+               IE = regsLive.end(), First = I; I != IE; ++I) {
+        if (I != First)
+          llvm::errs() << ", ";
+        llvm::errs() << PrintReg(*I, TRI);
+      }
+    }
     for (MachineBasicBlock::const_instr_iterator MBBI = MFI->instr_begin(),
            MBBE = MFI->instr_end(); MBBI != MBBE; ++MBBI) {
       if (MBBI->getParent() != MFI) {
@@ -1375,6 +1385,15 @@ void MachineVerifier::verifyIdempotentRegions() {
     set_union(LiveIns, MInfo.vregsRequired);
     DEBUG(dumpLiveIns(*Region, LiveIns, Indexes, TRI));
 
+    if (Entry->getParent()->getName() == "if.then") {
+      llvm::errs() << " with live-ins: [";
+      for (DenseSet<unsigned>::iterator I = LiveIns.begin(),
+               IE = LiveIns.end(), First = I; I != IE; ++I) {
+        if (I != First)
+          llvm::errs() << ", ";
+        llvm::errs() << PrintReg(*I, TRI);
+      }
+    }
     // The case with variable control is trivial; the registers that must not
     // be clobbered are simply the registers live at the region's entry point.
     if (IdempotencePreservationMode == IdempotenceOptions::VariableCF) {
