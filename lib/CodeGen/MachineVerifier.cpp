@@ -310,6 +310,7 @@ bool MachineVerifier::runOnMachineFunction(MachineFunction &MF) {
           llvm::errs() << ", ";
         llvm::errs() << PrintReg(*I, TRI);
       }
+      llvm::errs()<<"]\n";
     }
     for (MachineBasicBlock::const_instr_iterator MBBI = MFI->instr_begin(),
            MBBE = MFI->instr_end(); MBBI != MBBE; ++MBBI) {
@@ -1393,6 +1394,7 @@ void MachineVerifier::verifyIdempotentRegions() {
           llvm::errs() << ", ";
         llvm::errs() << PrintReg(*I, TRI);
       }
+      llvm::errs()<<"]\n";
     }
     // The case with variable control is trivial; the registers that must not
     // be clobbered are simply the registers live at the region's entry point.

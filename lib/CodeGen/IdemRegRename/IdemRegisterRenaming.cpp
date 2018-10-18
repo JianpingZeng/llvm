@@ -67,6 +67,15 @@ struct AntiDepPair {
   }
 };
 
+// records all def registers by instr before current mi.
+struct DefEntry {
+  std::set<MachineOperand*> first;
+  std::set<unsigned> second;
+
+  DefEntry() :first(), second() {}
+};
+
+
 class RegisterRenaming : public MachineFunctionPass {
 public:
   static char ID;
@@ -92,6 +101,7 @@ public:
     regions->releaseMemory();
     sequence.clear();
     allocaSet.clear();
+    insertedMoves.clear();
     //delete scavenger;
   }
 private:
@@ -114,7 +124,7 @@ private:
   void computeDefUseDataflow(MachineInstr *mi,
                              std::set<MachineOperand *> &uses,
                              std::vector<IdempotentRegion *> *Regions,
-                             std::map<MachineInstr *, std::set<MachineOperand *>> &prevDefs,
+                             std::map<MachineInstr *, DefEntry> &prevDefs,
                              std::map<MachineInstr *, std::set<MachineOperand *>> &prevUses);
   inline void addAntiDeps(MachineOperand *useMO, MachineOperand *defMO);
   void collectRefDefUseInfo(MachineInstr *mi, std::vector<IdempotentRegion *> *Regions);
@@ -228,8 +238,14 @@ private:
    */
   bool handleSingleDefMultiUses();
 
+  void clearLiveInOfInsertedMove();
+
+  void computeAntiDependenceSet();
+
+  void printPrevDefAndUse(RegisterRenaming *rr, MachineInstr *mi);
+
   // records all def registers by instr before current mi.
-  std::map<MachineInstr *, std::set<MachineOperand *>> prevDefRegs;
+  std::map<MachineInstr *, DefEntry> prevDefRegs;
   // records all use registers of current mi and previous mi.
   std::map<MachineInstr *, std::set<MachineOperand *>> prevUseRegs;
   std::deque<AntiDepPair> antiDeps;
@@ -248,6 +264,13 @@ private:
   //IdemInstrScavenger *scavenger;
   MachineDominatorTree *dt;
   std::vector<MachineBasicBlock *> sequence;
+  /**
+   * Keeps track of those move instruction inserted for resolving
+   * violating idempotence. We should erase the def register of those
+   * move instr from live-in registers set of the MBB enclosing the
+   * move instruction.
+   */
+  std::vector<MachineInstr*> insertedMoves;
 };
 }
 
@@ -287,30 +310,10 @@ bool contain(std::set<T> &set, T mo, _BinaryPredicate p) {
   return false;
 }
 
-template<class T, class _Binary_Predicate>
-static std::set<T> Union(std::set<T> &lhs, std::set<T> &rhs, _Binary_Predicate pred) {
-  std::set<T> res;
-  for (T t : lhs) {
-    if (!contain(res, t, pred))
-      res.insert(t);
-  }
-  for (T t : rhs) {
-    if (!contain(res, t, pred))
-      res.insert(t);
-  }
-  return res;
-}
-
 template<class T>
-static std::set<T> Union(std::set<T> &lhs, std::set<T> &rhs) {
-  std::set<T> res;
-  for (auto e : lhs)
-    res.insert(e);
-  for (auto e : rhs)
-    res.insert(e);
-  //res.insert(lhs.begin(), lhs.end());
-  //res.insert(rhs.begin(), rhs.begin());
-  return res;
+static void Union(std::set<T> &res, std::set<T> &lhs, std::set<T> &rhs) {
+  res.insert(lhs.begin(), lhs.end());
+  res.insert(rhs.begin(), rhs.end());
 }
 
 template<class T>
@@ -321,10 +324,14 @@ static void intersect(std::set<T> &res, std::set<T> lhs, std::set<T> rhs) {
   }
 }
 
+
 static void getDefUses(MachineInstr *mi,
                        std::set<MachineOperand *> *defs,
                        std::set<MachineOperand *> *uses,
-                       const BitVector &allocaSets) {
+                       const BitVector &allocaSets,
+                       std::set<unsigned> *defRegs = 0) {
+  if (!mi) return;
+
   for (unsigned i = 0, e = mi->getNumOperands(); i < e; i++) {
     MachineOperand *mo = &mi->getOperand(i);
     if (!mo || !mo->isReg() ||
@@ -340,7 +347,12 @@ static void getDefUses(MachineInstr *mi,
     } else if (mo->isUse() && uses)
       uses->insert(mo);
   }
+  if (defRegs) {
+    for (auto &mo : *defs)
+      defRegs->insert(mo->getReg());
+  }
 }
+
 
 bool contains(IdempotentRegion::inst_iterator begin,
               const IdempotentRegion::inst_iterator &end,
@@ -415,22 +427,22 @@ bool RegisterRenaming::regionContains(std::vector<IdempotentRegion *> *Regions,
  */
 template<bool IgnoreIdem>
 void RegisterRenaming::computeDefUseDataflow(MachineInstr *mi,
-                                             std::set<MachineOperand *> &uses,
-                                             std::vector<IdempotentRegion *> *Regions,
-                                             std::map<MachineInstr *, std::set<MachineOperand *>> &prevDefs,
-                                             std::map<MachineInstr *, std::set<MachineOperand *>> &prevUses) {
+                           std::set<MachineOperand *> &uses,
+                           std::vector<IdempotentRegion *> *Regions,
+                           std::map<MachineInstr *, DefEntry> &prevDefs,
+                           std::map<MachineInstr *, std::set<MachineOperand *>> &prevUses) {
   if (regions->isRegionEntry(*mi) && !IgnoreIdem) {
-    prevDefs[mi] = std::set<MachineOperand *>();
+    prevDefs[mi] = DefEntry();
     prevUses[mi] = uses;
   } else {
     // if the mi is the first mi of basic block with preds.
     if (mi == &mi->getParent()->front()) {
       MachineBasicBlock *mbb = mi->getParent();
       if (mbb->pred_empty()) {
-        prevDefs[mi] = std::set<MachineOperand *>();
+        prevDefs[mi] = DefEntry();
         prevUses[mi] = uses;
       } else {
-        std::set<MachineOperand *> &predDefs = prevDefs[mi];
+        DefEntry &predDefs = prevDefs[mi];
         std::set<MachineOperand *> &predUses = prevUses[mi];
 
         auto itr = mbb->pred_begin();
@@ -446,11 +458,16 @@ void RegisterRenaming::computeDefUseDataflow(MachineInstr *mi,
 
           std::set<MachineOperand *> localUses;
           std::set<MachineOperand *> localDefs;
+          std::set<unsigned> localDefRegs;
+          getDefUses(predMI, &localDefs, &localUses, allocaSet, &localDefRegs);
 
-          getDefUses(predMI, &localDefs, &localUses, allocaSet);
+          // union the defined machine operand set
+          Union(predDefs.first, localDefs, prevDefs[predMI].first);
 
-          predDefs = Union(localDefs, prevDefs[predMI], predEq);
-          predUses = Union(localUses, prevUseRegs[predMI]);
+          // intersect the defined register set.
+          intersect(predDefs.second, localDefRegs, prevDefs[predMI].second);
+
+          Union(predUses, localUses, prevUseRegs[predMI]);
         }
 
         predUses.insert(uses.begin(), uses.end());
@@ -458,14 +475,17 @@ void RegisterRenaming::computeDefUseDataflow(MachineInstr *mi,
     } else {
       // otherwise
       std::set<MachineOperand *> localPrevDefs;
+      std::set<unsigned> localPrevDefRegs;
       MachineInstr *prevMI = getPrevMI(mi);
       //IDEM_DEBUG(prevMI->dump());
 
       assert(prevMI && "previous machine instr can't be null!");
-      getDefUses(prevMI, &localPrevDefs, 0, allocaSet);
+      getDefUses(prevMI, &localPrevDefs, 0, allocaSet, &localPrevDefRegs);
 
-      prevDefs[mi] = Union(prevDefs[prevMI], localPrevDefs, predEq);
-      prevUses[mi] = Union(prevUses[prevMI], uses);
+      Union(prevDefs[mi].first, prevDefs[prevMI].first, localPrevDefs);
+      intersect(prevDefs[mi].second, prevDefs[prevMI].second, localPrevDefRegs);
+
+      Union(prevUses[mi], prevUses[prevMI], uses);
 
       /*
       IDEM_DEBUG(for (auto def : prevDefs[mi])
@@ -516,7 +536,7 @@ void RegisterRenaming::collectRefDefUseInfo(MachineInstr *mi,
       if (!regionContains(Regions, mo->getParent()))
         continue;
       if (mo->isReg() && mo->getReg() == defMO->getReg() &&
-          !contain(prevDefRegs[mo->getParent()], mo, predEq)) {
+          !prevDefRegs[mo->getParent()].second.count(mo->getReg())) {
         addAntiDeps(mo, defMO);
       }
     }
@@ -540,13 +560,12 @@ bool RegisterRenaming::isTwoAddressInstr(MachineInstr *useMI) {
 bool RegisterRenaming::shouldRename(AntiDepPair pair) {
   auto use = pair.use;
   MachineInstr *useMI = use->getParent();
-  std::set<MachineOperand *> &defs = prevDefRegs[useMI];
 
   // We should not rename the two-address instruction.
   if (isTwoAddressInstr(useMI))
     return false;
 
-  return !contain(defs, use, predEq);
+  return !prevDefRegs[useMI].second.count(use->getReg());
 }
 
 // for a group of sub live interval caused by splitting the original live interval.
@@ -627,6 +646,8 @@ void RegisterRenaming::insertSpillingCodeForInterval(LiveIntervalIdem* spilledIt
     // Inserts a boundary instruction immediately before the load to partition the
     // region into two different parts for avoiding violating idempotence.
     auto ld = getPrevMI(mi);
+    insertedMoves.push_back(ld);
+
     tii->emitIdemBoundary(*mi->getParent(), ld);
   }
 }
@@ -1176,6 +1197,8 @@ void RegisterRenaming::insertMoveAndBoundary(AntiDepPair &pair,
   // Step#10: insert a move instruction before splitting boundary instr.
   // This instruction would be the last killer of src reg in this copy instr.
   tii->copyPhysReg(*mbb, pos, DebugLoc(), phyReg, oldReg, pair.use->isKill());
+  insertedMoves.push_back(getPrevMI(pos));
+
 /*
   // annotate the undef flag to the src reg if src reg is liveIn.
   auto copyMI = getPrevMI(pos);
@@ -1220,7 +1243,7 @@ void RegisterRenaming::getCandidateInsertionPositionsDFS(MachineBasicBlock::iter
 
         if (!regionContains(&Regions, useMO->getParent()))
           continue;
-        for (auto redefReg : prevDefRegs[useMO->getParent()]) {
+        for (auto redefReg : prevDefRegs[useMO->getParent()].first) {
           if (regionContains(&Regions, useMO->getParent()) &&
               predEq(redefReg, useMO))
             candidates.insert(redefReg->getParent());
@@ -1347,7 +1370,7 @@ bool RegisterRenaming::handleMultiDepsWithinSameMI(AntiDepPair &pair) {
   std::vector<AntiDepPair> list;
   for (auto &defMO : defs) {
     for (auto &useMO : uses) {
-      if (predEq(defMO, useMO) && !contain(prevDefRegs[useMO->getParent()], useMO, predEq)) {
+      if (predEq(defMO, useMO) && !prevDefRegs[useMO->getParent()].second.count(useMO->getReg())) {
         list.emplace_back(useMO, defMO);
         goto BREAK;
       }
@@ -1417,6 +1440,7 @@ bool RegisterRenaming::handleMultiDepsWithinSameMI(AntiDepPair &pair) {
       // Step#10: insert a move instruction before splitting boundary instr.
       // This instruction would be the last killer of src reg in this copy instr.
       tii->copyPhysReg(*mbb, boundary, DebugLoc(), phyReg, oldReg, pair.use->isKill());
+      insertedMoves.push_back(getPrevMI(boundary));
 
     /*  // annotate the undef flag to the src reg if src reg is liveIn.
       auto copyMI = getPrevMI(boundary);
@@ -1449,7 +1473,7 @@ bool RegisterRenaming::idemCanBeRemoved(MachineInstr *mi) {
 
   // Re-compute the prevDef and prevUse set for each instruction after mi.
   // copy
-  std::map<MachineInstr *, std::set<MachineOperand *>> localPrevDefs = prevDefRegs;
+  std::map<MachineInstr *, DefEntry> localPrevDefs = prevDefRegs;
   std::map<MachineInstr *, std::set<MachineOperand *>> localPrevUses = prevUseRegs;
 
   MachineBasicBlock::iterator itr = mi;
@@ -1470,7 +1494,7 @@ bool RegisterRenaming::idemCanBeRemoved(MachineInstr *mi) {
 
     // checks
     auto prevDefs = localPrevDefs[itr];
-    if (prevDefs.empty())
+    if (prevDefs.second.empty())
       continue;
 
     auto prevUses = localPrevUses[itr];
@@ -1483,7 +1507,7 @@ bool RegisterRenaming::idemCanBeRemoved(MachineInstr *mi) {
         // We don't need to check whether is the useMI in the same region as
         // defMI, because our algorithm ensures useMI and defIMI must are in
         // the separate regions.
-        if (!contain(localPrevDefs[useMO->getParent()], useMO, predEq)) {
+        if (localPrevDefs[useMO->getParent()].second.count(useMO->getReg())) {
           removable = false;
           goto RETURN;
         }
@@ -1683,6 +1707,195 @@ bool RegisterRenaming::handleSingleDefMultiUses() {
   return changed;
 }
 
+void RegisterRenaming::clearLiveInOfInsertedMove() {
+  if (!insertedMoves.empty()) {
+    for (auto &mi : insertedMoves) {
+      MachineOperand &defMO = mi->getOperand(0);
+      assert(defMO.isDef() && defMO.isReg() && "Illegal inserted move instr");
+      unsigned defReg = defMO.getReg();
+
+      if (mi && mi->getParent() && !mi->getParent()->livein_empty()) {
+        auto mbb = mi->getParent();
+        if (mbb->isLiveIn(defReg))
+          mbb->removeLiveIn(defReg);
+      }
+    }
+  }
+}
+
+void RegisterRenaming::printPrevDefAndUse(RegisterRenaming *rr, MachineInstr *mi) {
+  if (!mi) return;
+
+  llvm::errs()<<"Uses: [";
+  for (auto &mo : rr->prevUseRegs[mi]) {
+    llvm::errs()<<tri->getName(mo->getReg())<<",";
+  }
+  llvm::errs()<<"]\n";
+  llvm::errs()<<"Defs: [";
+  for (auto &mo : rr->prevDefRegs[mi].second)
+  {
+    llvm::errs()<<tri->getName(mo)<<",";
+  }
+  llvm::errs()<<"]\n";
+}
+
+void RegisterRenaming::computeAntiDependenceSet() {
+
+  struct Data {
+    MachineBasicBlock::iterator prev;
+    MachineBasicBlock::iterator cur;
+    MachineBasicBlock* mbb;
+  };
+
+  std::vector<Data> worklist;
+  std::set<MachineBasicBlock*> visited;
+  std::vector<IdempotentRegion *> Regions;
+
+  // Compute prevDef and prevUse set for each machine instr.
+  for (auto itr = regions->begin(), end = regions->end(); itr != end; ++itr) {
+    MachineInstr *mi = &(*itr)->getEntry();
+    auto mbb = mi->getParent();
+
+    llvm::errs()<<mbb->getName()<<"\n";
+
+    worklist.clear();
+    visited.clear();
+    worklist.push_back({nullptr, mi, mbb});
+    visited.insert(mbb);
+
+    while (!worklist.empty()) {
+      auto &data = worklist.back();
+      MachineBasicBlock::iterator prevMI = data.prev;
+      MachineBasicBlock::iterator curMI = data.cur;
+      worklist.pop_back();
+
+      if (!data.mbb)
+        continue;
+
+      if (!data.mbb->empty()) {
+        if (!prevMI) {
+          prevDefRegs[&*curMI] = DefEntry();
+          prevUseRegs[&*curMI] = std::set<MachineOperand *>();
+        } else {
+          // Step#3: collects reg definition information.
+          // Step#4: collects reg uses information.
+          regions->getRegionsContaining(*curMI, &Regions);
+
+          std::set<MachineOperand *> localPrevDefs;
+          std::set<unsigned> localPrevDefRegs;
+
+          assert(prevMI && "previous machine instr can't be null!");
+          getDefUses(prevMI, &localPrevDefs, 0, allocaSet, &localPrevDefRegs);
+          auto &prevDef = prevDefRegs[&*curMI];
+          auto &prevUse = prevUseRegs[&*curMI];
+
+          curMI->dump();
+          for (auto &mo : prevDef.first) {
+            llvm::errs()<<tri->getName(mo->getReg())<<",";
+          }
+          llvm::errs()<<"\n";
+          for (auto &mo : prevUse) {
+            llvm::errs()<<tri->getName(mo->getReg())<<",";
+          }
+          llvm::errs()<<"\n";
+
+          auto &prevMIPrevDef = prevDefRegs[&*prevMI];
+
+          printPrevDefAndUse(this, prevMI);
+
+          Union(prevDef.first, prevMIPrevDef.first, localPrevDefs);
+          intersect(prevDef.second, prevMIPrevDef.second, localPrevDefRegs);
+
+          std::set<MachineOperand*> uses;
+          getDefUses(curMI, 0, &uses, allocaSet);
+
+          llvm::errs()<<"Local Uses: [";
+          for (auto &mo : uses) {
+            llvm::errs()<<tri->getName(mo->getReg())<<",";
+          }
+          llvm::errs()<<"]\n";
+          for (auto &mo : prevUseRegs[&*prevMI]) {
+            llvm::errs()<<tri->getName(mo->getReg())<<",";
+          }
+          llvm::errs()<<"\n";
+
+          Union(prevUse, prevUseRegs[&*prevMI], uses);
+
+          printPrevDefAndUse(this, curMI);
+        }
+
+        auto savedCurMI = curMI;
+        auto nextMI = ++curMI;
+        curMI = savedCurMI;
+
+        if (nextMI != curMI->getParent()->end() && !tii->isIdemBoundary(nextMI)) {
+          worklist.push_back({curMI, nextMI, data.mbb});
+          continue;
+        }
+        else if (tii->isIdemBoundary(nextMI))
+          continue;
+      }
+      else
+        curMI = prevMI;
+
+      // handle the successor block.
+      for (auto itr = mbb->succ_rbegin(), end = mbb->succ_rend(); itr != end;
+            ++itr) {
+        if (visited.insert(*itr).second) {
+          if (!(*itr)->empty() && tii->isIdemBoundary(&(*itr)->front()))
+            continue;
+
+          worklist.push_back({curMI, (*itr)->begin(), *itr});
+        }
+      }
+    }
+  }
+
+  // Collects the anti-dependences.
+  for (auto &mbb : sequence) {
+    for (auto &mi : *mbb) {
+      std::set<MachineOperand*> defs;
+      getDefUses(&mi, &defs, 0, allocaSet, 0);
+      if (defs.empty())
+        return;
+
+      std::set<MachineOperand *> &prevUses = prevUseRegs[&mi];
+
+      for (auto defMO : defs) {
+        for (MachineOperand *mo : prevUses) {
+
+          // We should not collect pair about two address instruction.
+          if (isTwoAddressInstr(mo->getParent()))
+            continue;
+
+          // we don't care those anti-dependence whose def and use are not  belong to
+          // the same idempotence region.
+          if (!regionContains(&Regions, mo->getParent()))
+            continue;
+          if (mo->isReg() && mo->getReg() == defMO->getReg() &&
+              !prevDefRegs[mo->getParent()].second.count(mo->getReg())) {
+            addAntiDeps(mo, defMO);
+          }
+        }
+      }
+    }
+  }
+
+/*  for (auto &mbb : sequence) {
+    auto mi = mbb->instr_begin();
+    auto mie = mbb->instr_end();
+    for (; mi != mie; ++mi) {
+      assert(li->mi2Idx.count(mi));
+
+      // Step#3: collects reg definition information.
+      // Step#4: collects reg uses information.
+      std::vector<IdempotentRegion *> Regions;
+      regions->getRegionsContaining(*mi, &Regions);
+      collectRefDefUseInfo(mi, &Regions);
+    }
+  }*/
+}
+
 bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
   mf = &MF;
   tii = MF.getTarget().getInstrInfo();
@@ -1701,26 +1914,12 @@ bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
   // We must ensure that we will not change the CFG of this Function.
   // The only thing we need to modify is inserting boundary instr as
   // appropriate.
-
   computeReversePostOrder(MF, *dt, sequence);
   bool changed = false;
 
-  //llvm::errs()<<"Deal with: "<<MF.getFunction()->getName()<<"\n";
   do {
     // Step#2: visits register operand of each machine instr in the program sequence.
-    for (auto &mbb : sequence) {
-      auto mi = mbb->instr_begin();
-      auto mie = mbb->instr_end();
-      for (; mi != mie; ++mi) {
-        assert(li->mi2Idx.count(mi));
-
-        // Step#3: collects reg definition information.
-        // Step#4: collects reg uses information.
-        std::vector<IdempotentRegion *> Regions(20);
-        regions->getRegionsContaining(*mi, &Regions);
-        collectRefDefUseInfo(mi, &Regions);
-      }
-    }
+    computeAntiDependenceSet();
 
     // If there is not antiDeps exist, just early break from do loop.
     if (antiDeps.empty())
@@ -1763,6 +1962,12 @@ bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
     reconstructIdemAndLiveInterval();
   }while (true);
 
+   // Keeps track of those move instruction inserted for resolving
+   // violating idempotence. We should erase the def register of those
+   // move instr from live-in registers set of the MBB enclosing the
+   // move instruction.
+  clearLiveInOfInsertedMove();
+
   // FIXME, cleanup is needed for transforming some incorrect code into normal status.
   bool localChanged;
   do {
@@ -1772,20 +1977,7 @@ bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
 
   changed |= localChanged;
 
-  for (auto &mbb : sequence) {
-    auto mi = mbb->instr_begin();
-    auto mie = mbb->instr_end();
-    for (; mi != mie; ++mi) {
-      assert(li->mi2Idx.count(mi));
-
-      // Step#3: collects reg definition information.
-      // Step#4: collects reg uses information.
-      std::vector<IdempotentRegion *> Regions(20);
-      regions->getRegionsContaining(*mi, &Regions);
-      collectRefDefUseInfo(mi, &Regions);
-    }
-  }
-
+  computeAntiDependenceSet();
   // If there is not antiDeps exist, just early break from do loop.
   assert(antiDeps.empty() && "There are anti-dependences remained!");
 
