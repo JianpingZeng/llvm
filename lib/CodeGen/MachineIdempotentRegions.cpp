@@ -240,8 +240,8 @@ bool MachineIdempotentRegions::verifyOperand(
   bool Verified = !LiveIns.count(Reg);
   if (!Verified) {
     errs() << PrintReg(Reg, TRI_) << " CLOBBER in:";
-    if (Indexes)
-      errs() << "\t" << Indexes->getInstructionIndex(MO.getParent());
+    /*if (Indexes)
+      errs() << "\t" << Indexes->getInstructionIndex(MO.getParent());*/
     errs() << "\t\t" << *MO.getParent();
   }
   return Verified;

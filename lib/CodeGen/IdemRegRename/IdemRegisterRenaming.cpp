@@ -1175,8 +1175,8 @@ void RegisterRenaming::insertMoveAndBoundary(AntiDepPair &pair,
 
   // Step#10: insert a move instruction before splitting boundary instr.
   // This instruction would be the last killer of src reg in this copy instr.
-  tii->copyPhysReg(*mbb, pos, DebugLoc(), phyReg, oldReg, false);
-
+  tii->copyPhysReg(*mbb, pos, DebugLoc(), phyReg, oldReg, pair.use->isKill());
+/*
   // annotate the undef flag to the src reg if src reg is liveIn.
   auto copyMI = getPrevMI(pos);
 
@@ -1185,7 +1185,7 @@ void RegisterRenaming::insertMoveAndBoundary(AntiDepPair &pair,
     auto &mo = copyMI->getOperand(i);
     if (mo.isReg() && mo.getReg())
       mo.setIsUndef(true);
-  }
+  }*/
 
   // FIXME, 9/17/2018, we need update prevDef, prevUses reg set, and idempotence regions.
   updatePrevDefUses();
@@ -1416,9 +1416,9 @@ bool RegisterRenaming::handleMultiDepsWithinSameMI(AntiDepPair &pair) {
       assert(tii->isIdemBoundary(boundary) && "the mi at inserted position must be a splitting boundary!");
       // Step#10: insert a move instruction before splitting boundary instr.
       // This instruction would be the last killer of src reg in this copy instr.
-      tii->copyPhysReg(*mbb, boundary, DebugLoc(), phyReg, oldReg, true);
+      tii->copyPhysReg(*mbb, boundary, DebugLoc(), phyReg, oldReg, pair.use->isKill());
 
-      // annotate the undef flag to the src reg if src reg is liveIn.
+    /*  // annotate the undef flag to the src reg if src reg is liveIn.
       auto copyMI = getPrevMI(boundary);
 
       // attach the undef flag to all src regs.
@@ -1426,7 +1426,7 @@ bool RegisterRenaming::handleMultiDepsWithinSameMI(AntiDepPair &pair) {
         auto &mo = copyMI->getOperand(i);
         if (mo.isReg() && mo.getReg())
           mo.setIsUndef(true);
-      }
+      }*/
       // Update prev defs and uses dataflow.
       updatePrevDefUses();
     }
@@ -1523,6 +1523,9 @@ bool RegisterRenaming::scavengerIdem() {
 
     // In simply case, delete a sequence of idem call instr.
     auto itr = mbb.begin();
+    if (&mbb == &mf->front() && tii->isIdemBoundary(&*itr))
+      removable.push_back(const_cast<MachineInstr *>(&*itr));
+
     for (; itr != mbb.end();) {
 
       if (!tii->isIdemBoundary(&*itr)) {
@@ -1537,7 +1540,7 @@ bool RegisterRenaming::scavengerIdem() {
       itr = next;
     }
     changed |= clearUselessIdem(removable);
-
+/*
     itr = mbb.begin();
     for (; itr != mbb.end(); ++itr) {
       auto mi = const_cast<MachineInstr *>(&*itr);
@@ -1550,7 +1553,7 @@ bool RegisterRenaming::scavengerIdem() {
       }
     }
 
-    changed |= clearUselessIdem(removable);
+    changed |= clearUselessIdem(removable);*/
   }
   return changed;
 }
@@ -1702,7 +1705,6 @@ bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
   computeReversePostOrder(MF, *dt, sequence);
   bool changed = false;
 
-
   //llvm::errs()<<"Deal with: "<<MF.getFunction()->getName()<<"\n";
   do {
     // Step#2: visits register operand of each machine instr in the program sequence.
@@ -1762,23 +1764,7 @@ bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
   }while (true);
 
   // FIXME, cleanup is needed for transforming some incorrect code into normal status.
-  for (auto &mbb : sequence) {
-    auto mi = mbb->instr_begin();
-    auto mie = mbb->instr_end();
-    for (; mi != mie; ++mi) {
-      assert(li->mi2Idx.count(mi));
-
-      // Step#3: collects reg definition information.
-      // Step#4: collects reg uses information.
-      std::vector<IdempotentRegion *> Regions(20);
-      regions->getRegionsContaining(*mi, &Regions);
-      collectRefDefUseInfo(mi, &Regions);
-    }
-  }
-
-  // If there is not antiDeps exist, just early break from do loop.
-  assert(antiDeps.empty() && "There are anti-dependences remained!");
-/*  bool localChanged;
+  bool localChanged;
   do {
     localChanged = scavengerIdem();
     changed |= localChanged;
@@ -1801,7 +1787,7 @@ bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
   }
 
   // If there is not antiDeps exist, just early break from do loop.
-  assert(antiDeps.empty() && "There are anti-dependences remained!");*/
+  assert(antiDeps.empty() && "There are anti-dependences remained!");
 
   return changed;
 }
