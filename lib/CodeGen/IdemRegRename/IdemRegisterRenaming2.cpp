@@ -31,6 +31,7 @@ using namespace llvm;
 namespace {
 
 struct AntiDeps {
+  unsigned reg;
   std::vector<MachineOperand *> uses;
   std::vector<MachineOperand *> defs;
 };
@@ -61,13 +62,14 @@ private:
   void computeAntiDependenceSet();
   void gatherAntiDeps(MachineInstr *idem);
   bool handleAntiDependences();
-  void collectAntiDepsTrace(int,
+  void collectAntiDepsTrace(unsigned,
                             MachineBasicBlock::iterator,
                             MachineBasicBlock::iterator,
                             MachineBasicBlock *,
                             std::set<MachineBasicBlock *> &,
                             std::vector<MachineOperand *>,
                             std::vector<MachineOperand *>);
+  bool isTwoAddressInstr(MachineInstr *useMI);
 
 private:
   const TargetInstrInfo *tii;
@@ -95,7 +97,7 @@ static bool contains(std::vector<MachineOperand *> &set, int reg) {
 
 }
 
-void IdemRegisterRenamer::collectAntiDepsTrace(int reg,
+void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
                                                MachineBasicBlock::iterator idem,
                                                MachineBasicBlock::iterator end,
                                                MachineBasicBlock *mbb,
@@ -133,7 +135,7 @@ void IdemRegisterRenamer::collectAntiDepsTrace(int reg,
 
   // Construct anti-dependences accoridng uses and defs set.
 CONST_IDEM:
-  antiDeps.push_back({uses, defs});
+  antiDeps.push_back({reg, uses, defs});
   return;
 }
 
@@ -159,7 +161,43 @@ void IdemRegisterRenamer::computeAntiDependenceSet() {
   }
 }
 
+bool IdemRegisterRenamer::isTwoAddressInstr(MachineInstr *useMI) {
+  // We should not rename the two-address instruction.
+  auto MCID = useMI->getDesc();
+  int numOps = useMI->isInlineAsm() ? useMI->getNumOperands() : MCID.getNumOperands();
+  for (int i = 0; i < numOps; i++) {
+    unsigned destIdx;
+    if (!useMI->isRegTiedToDefOperand(i, &destIdx))
+      continue;
+
+    return true;
+  }
+  return false;
+}
+
 bool IdemRegisterRenamer::handleAntiDependences() {
+  if (antiDeps.empty())
+    return false;
+
+  for (auto &pair : antiDeps) {
+    if (pair.uses.size() == 1) {
+      if (isTwoAddressInstr(pair.uses[0]->getParent())) {
+        
+      }
+      else {
+
+      }
+    }
+
+
+    // get the last insertion position of previous adjacent region
+    // or the position of prior instruction depends on if the current instr
+    // is a two address instr.
+
+    // get the free register
+    //
+  }
+
   return true;
 }
 
