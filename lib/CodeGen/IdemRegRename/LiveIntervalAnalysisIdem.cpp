@@ -367,7 +367,7 @@ bool LiveIntervalAnalysisIdem::runOnMachineFunction(MachineFunction &MF) {
 
   // Step #1: compute block order.
   std::vector<MachineBasicBlock *> sequence;
-  computeReversePostOrder(MF, *dt, sequence);
+  computeReversePostOrder(MF, sequence);
 
   // Step#2: computes local data flow information.
   std::vector<std::set<unsigned> > liveGen(size);

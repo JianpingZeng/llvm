@@ -19,7 +19,6 @@ extern bool DebugIdemFlag;
 #define IDEM_DEBUG(X) 
 #endif
 void computeReversePostOrder(MachineFunction &MF,
-                             MachineDominatorTree &dt,
                              std::vector<MachineBasicBlock *> &sequence);
 /**
  * Checks if it is reachable from MI A to B. Return true if it reaches.

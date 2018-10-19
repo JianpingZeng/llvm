@@ -26,7 +26,9 @@ template<typename ValueT, typename ValueInfoT = DenseMapInfo<ValueT> >
 class DenseSet {
   typedef DenseMap<ValueT, char, ValueInfoT> MapTy;
   MapTy TheMap;
+
 public:
+  typedef ValueT key_type;
   DenseSet(const DenseSet &Other) : TheMap(Other.TheMap) {}
   explicit DenseSet(unsigned NumInitBuckets = 0) : TheMap(NumInitBuckets) {}
 

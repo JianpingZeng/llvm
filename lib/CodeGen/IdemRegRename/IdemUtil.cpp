@@ -35,7 +35,6 @@ static void computeReversePostOrder(MachineBasicBlock *root,
 }
 
 void llvm::computeReversePostOrder(MachineFunction &MF,
-                             MachineDominatorTree &dt,
                              std::vector<MachineBasicBlock *> &sequence) {
   sequence.clear();
   if (MF.empty())

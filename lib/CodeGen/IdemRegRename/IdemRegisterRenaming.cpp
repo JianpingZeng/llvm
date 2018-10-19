@@ -1937,16 +1937,16 @@ bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
   // We must ensure that we will not change the CFG of this Function.
   // The only thing we need to modify is inserting boundary instr as
   // appropriate.
-  computeReversePostOrder(MF, *dt, sequence);
+  computeReversePostOrder(MF, sequence);
   bool changed = false;
 
-  do {
+
     // Step#2: visits register operand of each machine instr in the program sequence.
     computeAntiDependenceSet();
 
     // If there is not antiDeps exist, just early break from do loop.
     if (antiDeps.empty())
-      break;
+      return false;
 
     // Step#5: checks if we should rename the defined register according to usd-def,
     //         If it is, construct a pair of use-def reg pair.
@@ -1984,15 +1984,15 @@ bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
     }
 
     // FIXME, cleanup is needed for transforming some incorrect code into normal status.
-    bool localChanged;
+  /*  bool localChanged;
     do {
       localChanged = scavengerIdem();
       changed |= localChanged;
     } while (localChanged);
 
     changed |= localChanged;
-    reconstructIdemAndLiveInterval();
-  }while (true);
+    reconstructIdemAndLiveInterval();*/
+
 
    // Keeps track of those move instruction inserted for resolving
    // violating idempotence. We should erase the def register of those
