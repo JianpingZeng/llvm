@@ -302,7 +302,7 @@ bool MachineVerifier::runOnMachineFunction(MachineFunction &MF) {
        MFI!=MFE; ++MFI) {
     visitMachineBasicBlockBefore(MFI);
 
-    if (MFI->getName() == "if.then") {
+    /*if (MFI->getName() == "if.then") {
       llvm::errs() << " with live-ins: [";
       for (DenseSet<unsigned>::iterator I = regsLive.begin(),
                IE = regsLive.end(), First = I; I != IE; ++I) {
@@ -311,7 +311,7 @@ bool MachineVerifier::runOnMachineFunction(MachineFunction &MF) {
         llvm::errs() << PrintReg(*I, TRI);
       }
       llvm::errs()<<"]\n";
-    }
+    }*/
     for (MachineBasicBlock::const_instr_iterator MBBI = MFI->instr_begin(),
            MBBE = MFI->instr_end(); MBBI != MBBE; ++MBBI) {
       if (MBBI->getParent() != MFI) {
@@ -1363,7 +1363,7 @@ void MachineVerifier::verifyIdempotentRegions() {
 
   auto savedIdemPreservationMode = IdempotencePreservationMode;
   if (EnableRegisterRenaming)
-    IdempotencePreservationMode = IdempotenceOptions::VariableCF;
+    IdempotencePreservationMode = IdempotenceOptions::InvariableCF;
 
   for (MachineIdempotentRegions::const_iterator R = MIR->begin(),
        RE = MIR->end(); R != RE; ++R) {
@@ -1386,7 +1386,7 @@ void MachineVerifier::verifyIdempotentRegions() {
     set_union(LiveIns, MInfo.vregsRequired);
     DEBUG(dumpLiveIns(*Region, LiveIns, Indexes, TRI));
 
-    if (Entry->getParent()->getName() == "if.then") {
+/*    if (Entry->getParent()->getName() == "if.then") {
       llvm::errs() << " with live-ins: [";
       for (DenseSet<unsigned>::iterator I = LiveIns.begin(),
                IE = LiveIns.end(), First = I; I != IE; ++I) {
@@ -1395,7 +1395,7 @@ void MachineVerifier::verifyIdempotentRegions() {
         llvm::errs() << PrintReg(*I, TRI);
       }
       llvm::errs()<<"]\n";
-    }
+    }*/
     // The case with variable control is trivial; the registers that must not
     // be clobbered are simply the registers live at the region's entry point.
     if (IdempotencePreservationMode == IdempotenceOptions::VariableCF) {

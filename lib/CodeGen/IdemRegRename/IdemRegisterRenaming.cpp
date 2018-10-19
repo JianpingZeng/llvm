@@ -251,7 +251,7 @@ private:
   std::deque<AntiDepPair> antiDeps;
   const TargetInstrInfo *tii;
   const TargetRegisterInfo *tri;
-  const MachineFunction *mf;
+  MachineFunction *mf;
   LiveIntervalAnalysisIdem *li;
   MachineFrameInfo *mfi;
   MachineRegisterInfo *mri;
@@ -342,14 +342,13 @@ static void getDefUses(MachineInstr *mi,
     unsigned &&reg = mo->getReg();
     assert(TargetRegisterInfo::isPhysicalRegister(reg));
 
-    if (mo->isDef() && defs) {
-      defs->insert(mo);
+    if (mo->isDef()) {
+      if (defs)
+        defs->insert(mo);
+      if (defRegs)
+        defRegs->insert(mo->getReg());
     } else if (mo->isUse() && uses)
       uses->insert(mo);
-  }
-  if (defRegs) {
-    for (auto &mo : *defs)
-      defRegs->insert(mo->getReg());
   }
 }
 
@@ -1710,14 +1709,16 @@ bool RegisterRenaming::handleSingleDefMultiUses() {
 void RegisterRenaming::clearLiveInOfInsertedMove() {
   if (!insertedMoves.empty()) {
     for (auto &mi : insertedMoves) {
-      MachineOperand &defMO = mi->getOperand(0);
-      assert(defMO.isDef() && defMO.isReg() && "Illegal inserted move instr");
-      unsigned defReg = defMO.getReg();
+      std::set<unsigned> defs;
+      getDefUses(mi, 0, 0, allocaSet, &defs);
+
+      assert(!defs.empty() && "Illegal inserted move instr");
 
       if (mi && mi->getParent() && !mi->getParent()->livein_empty()) {
         auto mbb = mi->getParent();
-        if (mbb->isLiveIn(defReg))
-          mbb->removeLiveIn(defReg);
+        for (auto defReg : defs)
+          if (mbb->isLiveIn(defReg))
+            mbb->removeLiveIn(defReg);
       }
     }
   }
@@ -1751,12 +1752,18 @@ void RegisterRenaming::computeAntiDependenceSet() {
   std::set<MachineBasicBlock*> visited;
   std::vector<IdempotentRegion *> Regions;
 
+  for (auto mbb : sequence) {
+    if (!mbb) continue;
+    for (auto &mi : *mbb) {
+      prevDefRegs[&mi] = DefEntry();
+      prevUseRegs[&mi] = std::set<MachineOperand*>();
+    }
+  }
   // Compute prevDef and prevUse set for each machine instr.
   for (auto itr = regions->begin(), end = regions->end(); itr != end; ++itr) {
     MachineInstr *mi = &(*itr)->getEntry();
     auto mbb = mi->getParent();
-
-    llvm::errs()<<mbb->getName()<<"\n";
+    if (!mbb) continue;
 
     worklist.clear();
     visited.clear();
@@ -1788,7 +1795,7 @@ void RegisterRenaming::computeAntiDependenceSet() {
           getDefUses(prevMI, &localPrevDefs, 0, allocaSet, &localPrevDefRegs);
           auto &prevDef = prevDefRegs[&*curMI];
           auto &prevUse = prevUseRegs[&*curMI];
-
+/*
           curMI->dump();
           for (auto &mo : prevDef.first) {
             llvm::errs()<<tri->getName(mo->getReg())<<",";
@@ -1797,11 +1804,11 @@ void RegisterRenaming::computeAntiDependenceSet() {
           for (auto &mo : prevUse) {
             llvm::errs()<<tri->getName(mo->getReg())<<",";
           }
-          llvm::errs()<<"\n";
+          llvm::errs()<<"\n";*/
 
           auto &prevMIPrevDef = prevDefRegs[&*prevMI];
 
-          printPrevDefAndUse(this, prevMI);
+          /*printPrevDefAndUse(this, prevMI);*/
 
           Union(prevDef.first, prevMIPrevDef.first, localPrevDefs);
           intersect(prevDef.second, prevMIPrevDef.second, localPrevDefRegs);
@@ -1809,7 +1816,7 @@ void RegisterRenaming::computeAntiDependenceSet() {
           std::set<MachineOperand*> uses;
           getDefUses(curMI, 0, &uses, allocaSet);
 
-          llvm::errs()<<"Local Uses: [";
+          /*llvm::errs()<<"Local Uses: [";
           for (auto &mo : uses) {
             llvm::errs()<<tri->getName(mo->getReg())<<",";
           }
@@ -1817,11 +1824,11 @@ void RegisterRenaming::computeAntiDependenceSet() {
           for (auto &mo : prevUseRegs[&*prevMI]) {
             llvm::errs()<<tri->getName(mo->getReg())<<",";
           }
-          llvm::errs()<<"\n";
+          llvm::errs()<<"\n";*/
 
           Union(prevUse, prevUseRegs[&*prevMI], uses);
 
-          printPrevDefAndUse(this, curMI);
+          /*printPrevDefAndUse(this, curMI);*/
         }
 
         auto savedCurMI = curMI;
@@ -1852,48 +1859,61 @@ void RegisterRenaming::computeAntiDependenceSet() {
   }
 
   // Collects the anti-dependences.
-  for (auto &mbb : sequence) {
+  for (auto mbb : sequence) {
+    /*llvm::errs()<<mbb->getName()<<"\n";*/
     for (auto &mi : *mbb) {
+      /*mi.dump();*/
       std::set<MachineOperand*> defs;
       getDefUses(&mi, &defs, 0, allocaSet, 0);
       if (defs.empty())
-        return;
+        continue;
 
       std::set<MachineOperand *> &prevUses = prevUseRegs[&mi];
 
+      /*if (mbb->getName() == "if.then") {
+        llvm::errs()<<"defs: [";
+        for (auto &mo : defs)
+          llvm::errs()<<tri->getName(mo->getReg())<<",";
+        llvm::errs()<<"]\n";
+
+        llvm::errs()<<"prev uses: [";
+        for (auto &mo : prevUses)
+          llvm::errs()<<tri->getName(mo->getReg())<<",";
+
+        llvm::errs()<<"]\n";
+      }*/
       for (auto defMO : defs) {
         for (MachineOperand *mo : prevUses) {
 
           // We should not collect pair about two address instruction.
-          if (isTwoAddressInstr(mo->getParent()))
+          if (isTwoAddressInstr(mo->getParent())) {
+            // FIXME 10/18/2018 Jianping Zeng, Ignore the two address instruction as yet.
+            insertedMoves.push_back(mo->getParent());
             continue;
+          }
 
           // we don't care those anti-dependence whose def and use are not  belong to
           // the same idempotence region.
+          regions->getRegionsContaining(*mo->getParent(), &Regions);
           if (!regionContains(&Regions, mo->getParent()))
             continue;
+
+          /*for (auto reg : prevDefRegs[mo->getParent()].second)
+            llvm::errs()<<tri->getName(reg)<<" ";
+
+          llvm::errs()<<"\n";
+         int res = !temp.count(mo->getReg());
+          */
+          auto temp = prevDefRegs[mo->getParent()].second;
+
           if (mo->isReg() && mo->getReg() == defMO->getReg() &&
-              !prevDefRegs[mo->getParent()].second.count(mo->getReg())) {
+              (temp.empty() || !temp.count(mo->getReg()))) {
             addAntiDeps(mo, defMO);
           }
         }
       }
     }
   }
-
-/*  for (auto &mbb : sequence) {
-    auto mi = mbb->instr_begin();
-    auto mie = mbb->instr_end();
-    for (; mi != mie; ++mi) {
-      assert(li->mi2Idx.count(mi));
-
-      // Step#3: collects reg definition information.
-      // Step#4: collects reg uses information.
-      std::vector<IdempotentRegion *> Regions;
-      regions->getRegionsContaining(*mi, &Regions);
-      collectRefDefUseInfo(mi, &Regions);
-    }
-  }*/
 }
 
 bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
@@ -1905,6 +1925,9 @@ bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
   mri = &MF.getRegInfo();
   td = MF.getTarget().getTargetData();
   allocaSet = tri->getAllocatableSet(*mf);
+
+  MF.dump();
+  exit(0);
 
   // Step#1: Collects regions
   regions = getAnalysisIfAvailable<MachineIdempotentRegions>();
@@ -1959,6 +1982,15 @@ bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
         changed = true;
       }
     }
+
+    // FIXME, cleanup is needed for transforming some incorrect code into normal status.
+    bool localChanged;
+    do {
+      localChanged = scavengerIdem();
+      changed |= localChanged;
+    } while (localChanged);
+
+    changed |= localChanged;
     reconstructIdemAndLiveInterval();
   }while (true);
 
@@ -1968,18 +2000,9 @@ bool RegisterRenaming::runOnMachineFunction(MachineFunction &MF) {
    // move instruction.
   clearLiveInOfInsertedMove();
 
-  // FIXME, cleanup is needed for transforming some incorrect code into normal status.
-  bool localChanged;
-  do {
-    localChanged = scavengerIdem();
-    changed |= localChanged;
-  } while (localChanged);
-
-  changed |= localChanged;
-
-  computeAntiDependenceSet();
+/*  computeAntiDependenceSet();
   // If there is not antiDeps exist, just early break from do loop.
-  assert(antiDeps.empty() && "There are anti-dependences remained!");
+  assert(antiDeps.empty() && "There are anti-dependences remained!");*/
 
   return changed;
 }
