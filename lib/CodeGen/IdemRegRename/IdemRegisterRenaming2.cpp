@@ -42,7 +42,7 @@ class IdemRegisterRenamer : public MachineFunctionPass {
 public:
   static char ID;
   IdemRegisterRenamer() : MachineFunctionPass(ID) {
-    //initializeRegisterRenamingPass(*PassRegistry::getPassRegistry());
+    initializeIdemRegisterRenamerPass(*PassRegistry::getPassRegistry());
   }
 
   virtual bool runOnMachineFunction(MachineFunction &MF) override;
@@ -53,10 +53,22 @@ public:
     AU.setPreservesAll();
     MachineFunctionPass::getAnalysisUsage(AU);
   }
+
   const char *getPassName() const {
     return "Register Renaming for Idempotence pass";
   }
+
   virtual void releaseMemory() {
+    tii = nullptr;
+    tri = nullptr;
+    delete mir;
+    reversePostOrderMBBs.clear();
+    antiDeps.clear();
+    delete gather;
+    delete li;
+    mf = nullptr;
+    mri = nullptr;
+    mfi = nullptr;
   }
 
 private:
@@ -106,7 +118,7 @@ private:
 
   unsigned getFreeRegisterForRenaming(unsigned useReg,
                                       LiveIntervalIdem *interval,
-                                      DenseSet<unsigned> unallcableRegs);
+                                      DenseSet<unsigned> unallocableRegs);
 
   void walkDFSToGatheringUses(unsigned reg,
                               MachineBasicBlock::iterator begin,
@@ -203,8 +215,8 @@ void IdemRegisterRenamer::gatherAntiDeps(MachineInstr *idem) {
 }
 
 void IdemRegisterRenamer::computeAntiDependenceSet() {
-  for (auto itr = mir->begin(), end = mir->end(); itr != end; ++itr) {
-    MachineInstr *idem = &(*itr)->getEntry();
+  for (auto &itr : *mir) {
+    MachineInstr *idem = &itr->getEntry();
     assert(idem && tii->isIdemBoundary(idem));
     gatherAntiDeps(idem);
   }
@@ -481,17 +493,17 @@ void IdemRegisterRenamer::insertSpillingCodeForInterval(LiveIntervalIdem *spille
         break;
       }
     // insert a boundary after store instr.
-    tii->emitIdemBoundary(*mi->getParent(), getNextMI(copyMI));
+    /*tii->emitIdemBoundary(*mi->getParent(), getNextMI(copyMI));*/
 
   } else if (mo->isUse()) {
     assert(frameIndex != INT_MIN);
     tii->loadRegFromStackSlot(*mi->getParent(), mi, usedReg, frameIndex, rc, tri);
     // Inserts a boundary instruction immediately before the load to partition the
     // region into two different parts for avoiding violating idempotence.
-    auto ld = getPrevMI(mi);
+    /*auto ld = getPrevMI(mi);*/
     /*insertedMoves.push_back(ld);*/
 
-    tii->emitIdemBoundary(*mi->getParent(), ld);
+    /*tii->emitIdemBoundary(*mi->getParent(), ld);*/
   }
 }
 
@@ -625,7 +637,6 @@ unsigned IdemRegisterRenamer::tryChooseBlockedRegister(LiveIntervalIdem &interva
 
   getSpilledSubLiveInterval(targetInter, spilledIntervs);
 
-  // TODO 10/04/2018, try to allocate other physical register to splitted intervals.
   if (!spilledIntervs.empty()) {
     std::set<unsigned> allocables;
     getAllocableRegs(targetInter->reg, allocables);
@@ -773,7 +784,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     // or the position of prior instruction depends on if the current instr
     // is a two address instr.
     bool twoAddrInstExits = isTwoAddressInstr(pair.uses.back()->getParent());
-    // TODO try to replace the old register name with other register to reduce
+    // Try to replace the old register name with other register to reduce
     // inserted move instruction.
     // If we can not find such register, than alter to insert move.
     if (!twoAddrInstExits) {
@@ -793,14 +804,14 @@ bool IdemRegisterRenamer::handleAntiDependences() {
 
       unsigned from = li->getIndex(pair.defs[0]->getParent());
       unsigned to = li->getIndex(mostFarway->getParent());
-      LiveIntervalIdem itrvl;
-      itrvl.addRange(from, to);
+      LiveIntervalIdem *itrvl = new LiveIntervalIdem();
+      itrvl->addRange(from, to);
       std::for_each(pair.defs.begin(), pair.defs.end(), [&](MachineOperand *mo) {
-        itrvl.usePoints.insert(UsePoint(li->getIndex(mo->getParent()), mo));
+        itrvl->usePoints.insert(UsePoint(li->getIndex(mo->getParent()), mo));
       });
 
       std::for_each(uses.begin(), uses.end(), [&](MachineOperand *mo) {
-        itrvl.usePoints.insert(UsePoint(li->getIndex(mo->getParent()), mo));
+        itrvl->usePoints.insert(UsePoint(li->getIndex(mo->getParent()), mo));
       });
 
 
@@ -810,7 +821,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         set_union(unallocableRegs, gather->getIdemLiveIns(&r->getEntry()));
       }
 
-      unsigned phyReg = getFreeRegisterForRenaming(pair.reg, &itrvl, unallocableRegs);
+      unsigned phyReg = getFreeRegisterForRenaming(pair.reg, itrvl, unallocableRegs);
 
       if (phyReg != 0) {
         // Find a free register can be used for replacing the clobber register.
