@@ -64,8 +64,7 @@ public:
     delete mir;
     reversePostOrderMBBs.clear();
     antiDeps.clear();
-    delete gather;
-    delete li;
+    li = nullptr;
     mf = nullptr;
     mri = nullptr;
     mfi = nullptr;
@@ -151,12 +150,19 @@ INITIALIZE_PASS_END(IdemRegisterRenamer, "reg-renaming",
 
 char IdemRegisterRenamer::ID = 0;
 
+FunctionPass * llvm::createIdemRegisterRenamerPass() {
+  return new IdemRegisterRenamer();
+}
+
 void IdemRegisterRenamer::collectLiveInRegistersForRegions() {
   gather->run();
 }
 
-static bool contains(std::vector<MachineOperand *> &set, int reg) {
-
+static bool contains(std::vector<MachineOperand *> &set, unsigned reg) {
+  for (auto &mo : set)
+    if (mo->getReg() == reg)
+      return true;
+  return false;
 }
 
 void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,

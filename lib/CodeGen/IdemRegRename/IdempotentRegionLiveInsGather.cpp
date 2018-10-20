@@ -31,13 +31,13 @@ void LiveInsGather::run() {
 
   auto RegSetEq = [](RegSet lhs, RegSet rhs) {
       if (lhs.size() != rhs.size()) return false;
-      auto itr = lhs.begin(), end = rhs.end();
+      auto itr = lhs.begin(), end = lhs.end();
       auto rhsItr = rhs.begin();
       for (; itr != end; ++itr, ++rhsItr) {
         if (*itr != *rhsItr)
           return false;
       }
-      return rhsItr == rhs.end();
+      return true;
   };
 
   bool changed;

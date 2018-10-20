@@ -272,6 +272,8 @@ namespace llvm {
   /// @author Jianping Zeng.
   FunctionPass *createRegisterRenamingPass();
 
+  FunctionPass *createIdemRegisterRenamerPass();
+
 } // End llvm namespace
 
 #endif

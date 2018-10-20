@@ -3,6 +3,8 @@
 
 #include <llvm/ADT/DenseSet.h>
 #include <llvm/ADT/BitVector.h>
+#include <map>
+#include <set>
 #include "llvm/CodeGen/MachineFunction.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Target/TargetInstrInfo.h"
@@ -15,23 +17,24 @@ namespace llvm {
 class LiveInsGather {
 private:
   const MachineFunction &mf;
-  typedef DenseSet<unsigned> RegSet;
+  typedef std::set<unsigned> RegSet;
 
-  RegSet regsLiveInButUnused;
   const TargetInstrInfo *tii;
   const TargetRegisterInfo *tri;
   // Register liveness at idempotent region boundaries.
-  DenseMap<const MachineInstr*, RegSet> idemLiveInMap;
-  DenseMap<const MachineBasicBlock*, RegSet> liveInMBBMap;
-  DenseMap<const MachineBasicBlock*, RegSet> liveOutMBBMap;
-  DenseMap<const MachineBasicBlock*, RegSet> liveGens;
-  DenseMap<const MachineBasicBlock*, RegSet> liveKills;
+  std::map<const MachineInstr *, RegSet> idemLiveInMap;
+  std::map<const MachineBasicBlock *, RegSet> liveInMBBMap;
+  std::map<const MachineBasicBlock *, RegSet> liveOutMBBMap;
+  std::map<const MachineBasicBlock *, RegSet> liveGens;
+  std::map<const MachineBasicBlock *, RegSet> liveKills;
 
 public:
-  LiveInsGather(const MachineFunction &MF) : mf(MF) {
-    tii = MF.getTarget().getInstrInfo();
-    tri = MF.getTarget().getRegisterInfo();
-  }
+  LiveInsGather(const MachineFunction &MF) : mf(MF), tii(MF.getTarget().getInstrInfo()),
+                                             tri(MF.getTarget().getRegisterInfo()),
+                                             idemLiveInMap(), liveInMBBMap(),
+                                             liveOutMBBMap(),
+                                             liveGens(), liveKills() { }
+
   void run();
 
   RegSet getIdemLiveIns(MachineInstr *mi) {

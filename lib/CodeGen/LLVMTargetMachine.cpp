@@ -471,7 +471,7 @@ bool LLVMTargetMachine::addCommonCodeGenPasses(PassManagerBase &PM,
   // Enable register renaming as a Post-RA pass.
   // Commented by Jianping Zeng on 9/5/2018.
   if (EnableRegisterRenaming) {
-    PM.add(llvm::createRegisterRenamingPass());
+    PM.add(llvm::createIdemRegisterRenamerPass());
     printAndVerifyRegRenaming(PM, "After Register Renaming for idem");
   }
 
