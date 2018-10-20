@@ -14,6 +14,7 @@
 #include <llvm/PassSupport.h>
 #include <llvm/CodeGen/MachineIdempotentRegions.h>
 #include <queue>
+#include <llvm/ADT/SetOperations.h>
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
@@ -72,7 +73,8 @@ private:
                             std::vector<MachineOperand *>);
   bool isTwoAddressInstr(MachineInstr *useMI);
   unsigned choosePhysRegForRenaming(MachineOperand *use,
-                                    LiveIntervalIdem *interval);
+                                    LiveIntervalIdem *interval,
+                                    DenseSet<unsigned> &unallocableRegs);
   void filterUnavailableRegs(MachineOperand *use,
                              BitVector &allocSet,
                              bool allowsAntiDep);
@@ -98,6 +100,22 @@ private:
                                       std::vector<LiveIntervalIdem *> &handled,
                                       std::vector<LiveIntervalIdem *> &spilled);
 
+  void getUsesSetOfDef(MachineOperand *def,
+                       std::vector<MachineOperand *> &uses,
+                       bool &usesInSameRegion);
+
+  unsigned getFreeRegisterForRenaming(unsigned useReg,
+                                      LiveIntervalIdem *interval,
+                                      DenseSet<unsigned> unallcableRegs);
+
+  void walkDFSToGatheringUses(unsigned reg,
+                              MachineBasicBlock::iterator begin,
+                              MachineBasicBlock::iterator end,
+                              MachineBasicBlock *mbb,
+                              std::set<MachineBasicBlock*> &visited,
+                              std::vector<MachineOperand *> &uses,
+                              bool &usesInSameRegion,
+                              bool seeIdem);
 private:
   const TargetInstrInfo *tii;
   const TargetRegisterInfo *tri;
@@ -620,13 +638,16 @@ unsigned IdemRegisterRenamer::tryChooseBlockedRegister(LiveIntervalIdem &interva
 }
 
 unsigned IdemRegisterRenamer::choosePhysRegForRenaming(MachineOperand *use,
-                                                       LiveIntervalIdem *interval) {
-  auto rc = tri->getMinimalPhysRegClass(use->getReg());
+                                                       LiveIntervalIdem *interval,
+                                                       DenseSet<unsigned> &unallocableRegs) {
   auto allocSet = tri->getAllocatableSet(*mf);
-  IDEM_DEBUG(llvm::errs() << "Required: " << rc->getName() << "\n";);
 
   // Remove some registers are not available when making decision of choosing.
-  filterUnavailableRegs(use, allocSet, false);
+  for (unsigned i = 0, e = allocSet.size(); i < e; i++)
+    if (allocSet[i] && unallocableRegs.count(i))
+      allocSet.reset(i);
+
+  // filterUnavailableRegs(use, allocSet, false);
 
   // obtains a free register used for move instr.
   unsigned useReg = use->getReg();
@@ -657,39 +678,227 @@ unsigned IdemRegisterRenamer::choosePhysRegForRenaming(MachineOperand *use,
   return freeReg;
 }
 
+unsigned IdemRegisterRenamer::getFreeRegisterForRenaming(unsigned useReg,
+                                                         LiveIntervalIdem *interval,
+                                                         DenseSet<unsigned> unallocableRegs) {
+  auto allocSet = tri->getAllocatableSet(*mf);
+
+  // Remove some registers are not available when making decision of choosing.
+  for (unsigned i = 0, e = allocSet.size(); i < e; i++)
+    if (allocSet[i] && unallocableRegs.count(i))
+      allocSet.reset(i);
+
+  for (int physReg = allocSet.find_first(); physReg > 0; physReg = allocSet.find_next(physReg)) {
+    if (li->intervals.count(physReg)) {
+
+      LiveIntervalIdem *itrv = li->intervals[physReg];
+
+      // we only consider those live interval which doesn't interfere with current
+      // interval.
+      // No matching in register class should be ignored.
+      // Avoiding LiveIn register(such as argument register).
+      if (!legalToReplace(physReg, useReg))
+        continue;
+
+      if (!itrv->intersects(interval))
+        return physReg;
+    } else if (legalToReplace(physReg, useReg)) {
+      // current physReg is free, so return it.
+      return static_cast<unsigned int>(physReg);
+    }
+  }
+  return 0;
+}
+
+void IdemRegisterRenamer::walkDFSToGatheringUses(unsigned reg,
+                            MachineBasicBlock::iterator begin,
+                            MachineBasicBlock::iterator end,
+                            MachineBasicBlock *mbb,
+                            std::set<MachineBasicBlock*> &visited,
+                            std::vector<MachineOperand *> &uses,
+                            bool &usesInSameRegion,
+                            bool seeIdem) {
+  if (!mbb) return;
+  if (!visited.insert(mbb).second)
+    return;
+
+  for (; begin != end; ++begin) {
+    auto mi = begin;
+    if (tii->isIdemBoundary(mi)) {
+      seeIdem = true;
+      continue;
+    }
+
+    for (int i = 0, e = mi->getNumOperands(); i < e; i++) {
+      auto mo = mi->getOperand(i);
+      if (mo.isReg() && mo.isUse() && mo.getReg() == reg) {
+        if (seeIdem) {
+          usesInSameRegion = false;
+          return;
+        }
+        else
+          uses.push_back(&mo);
+      }
+    }
+  }
+
+  if (!mbb->succ_empty()) {
+    for (auto succ = mbb->succ_begin(), succEnd = mbb->succ_end(); succ != succEnd; ++succ) {
+      walkDFSToGatheringUses(reg, (*succ)->begin(), (*succ)->end(), *succ, visited, uses, usesInSameRegion, seeIdem);
+      if (!usesInSameRegion) return;
+    }
+  }
+}
+
+void IdemRegisterRenamer::getUsesSetOfDef(MachineOperand *def,
+                                          std::vector<MachineOperand *> &uses,
+                                          bool &usesInSameRegion) {
+  usesInSameRegion = true;
+  std::set<MachineBasicBlock*> visited;
+  auto mbb = def->getParent()->getParent();
+  walkDFSToGatheringUses(def->getReg(), def->getParent(), mbb->end(), mbb, visited, uses, usesInSameRegion, false);
+}
+
 bool IdemRegisterRenamer::handleAntiDependences() {
   if (antiDeps.empty())
     return false;
 
+  std::vector<IdempotentRegion *> regions;
+
   for (auto &pair : antiDeps) {
+
+    mir->getRegionsContaining(*pair.uses.front()->getParent(), &regions);
+
     // get the last insertion position of previous adjacent region
     // or the position of prior instruction depends on if the current instr
     // is a two address instr.
+    bool twoAddrInstExits = isTwoAddressInstr(pair.uses.back()->getParent());
+    // TODO try to replace the old register name with other register to reduce
+    // inserted move instruction.
+    // If we can not find such register, than alter to insert move.
+    if (!twoAddrInstExits) {
+      // We just count on such situation that all uses are within the same region
+      // as the current region.
+      std::vector<MachineOperand *> uses;
+      bool usesInSameRegion = false;
+      getUsesSetOfDef(pair.defs.back(), uses, usesInSameRegion);
+      if (!usesInSameRegion)
+        goto INSERT_MOVE;
 
+      MachineOperand *mostFarway = nullptr;
+      for (auto &mo : uses) {
+        if (!mostFarway || li->getIndex(mo->getParent()) > li->getIndex(mostFarway->getParent()))
+          mostFarway = mo;
+      }
+
+      unsigned from = li->getIndex(pair.defs[0]->getParent());
+      unsigned to = li->getIndex(mostFarway->getParent());
+      LiveIntervalIdem itrvl;
+      itrvl.addRange(from, to);
+      std::for_each(pair.defs.begin(), pair.defs.end(), [&](MachineOperand *mo) {
+        itrvl.usePoints.insert(UsePoint(li->getIndex(mo->getParent()), mo));
+      });
+
+      std::for_each(uses.begin(), uses.end(), [&](MachineOperand *mo) {
+        itrvl.usePoints.insert(UsePoint(li->getIndex(mo->getParent()), mo));
+      });
+
+
+      DenseSet<unsigned> unallocableRegs;
+      unallocableRegs.insert(pair.reg);
+      for (auto &r : regions) {
+        set_union(unallocableRegs, gather->getIdemLiveIns(&r->getEntry()));
+      }
+
+      unsigned phyReg = getFreeRegisterForRenaming(pair.reg, &itrvl, unallocableRegs);
+
+      if (phyReg != 0) {
+        // Find a free register can be used for replacing the clobber register.
+        std::for_each(pair.defs.begin(), pair.defs.end(), [=](MachineOperand *mo) {
+          mo->setReg(phyReg);
+        });
+        std::for_each(uses.begin(), uses.end(), [=](MachineOperand *mo) {
+          mo->setReg(phyReg);
+        });
+
+        // Finish replacing, skip following inserting move instr.
+        continue;
+      }
+    }
+
+INSERT_MOVE:
     // get the free register
+    unsigned phyReg = 0;
 
-    // FIXME, 9/17/2018. Now, live range computes correctly .
-    LiveIntervalIdem *interval = new LiveIntervalIdem;
-    auto from = li->getIndex(useMI) - 2;
-    auto to = li->getIndex(useMI);
-    interval->addRange(from, to);    // add an interval for a temporal move instr.
-    unsigned phyReg = choosePhysRegForRenaming(pair.uses[0], interval);
+    if (!twoAddrInstExits || pair.uses.size() > 1) {
+      if (regions.empty())
+        continue;
 
-    assert(TargetRegisterInfo::isPhysicalRegister(phyReg));
-    assert(phyReg != pair.uses.back()->getReg());
+      // We choose that insertion whose index is minimal
+      unsigned minIndex = UINT32_MAX;
+      MachineInstr *insertedPos = nullptr;
+      std::vector<MachineInstr *> prevRegionIdems;
 
-    // We shouldn't select the free register from the following kinds:
-    // 1. live-in registers of current region.
-    // 2. live-in registers of prior region (move instr will be inserted at the end of prior region)
-    // 3. interfered registers set.
+      // We shouldn't select the free register from the following kinds:
+      // 1. live-in registers of current region.
+      // 2. live-in registers of prior region (move instr will be inserted at the end of prior region)
+      // 3. interfered registers set.
+      //
+      // ... = R0 + ...
+      // ... = R0 + ...
+      // ...
+      // R0, ... = LDR_INC R0  (two address instr)
+      // we should insert a special move instr for two address instr.
+      DenseSet<unsigned> unallocableRegs;
 
+      for (auto r : regions) {
+        MachineInstr &idem = r->getEntry();
+        set_union(unallocableRegs, gather->getIdemLiveIns(&idem));
 
-    // ... = R0 + ...
-    // ... = R0 + ...
-    // ...
-    // R0, ... = LDR_INC R0  (two address instr)
-    // we should insert a special move instr for two address instr.
-    if (isTwoAddressInstr(pair.uses.back()->getParent())) {
+        unsigned index = li->getIndex(&idem);
+        if (index < minIndex) {
+          minIndex = index;
+          insertedPos = &idem;
+        }
+      }
+
+      assert(insertedPos);
+      mir->getRegionsContaining(*getPrevMI(insertedPos), &regions);
+      for (auto r : regions)
+        set_union(unallocableRegs, gather->getIdemLiveIns(&r->getEntry()));
+
+      // can not assign the old register to use mi
+      unallocableRegs.insert(pair.reg);
+      std::for_each(pair.uses.begin(), pair.uses.end(), [&](MachineOperand *mo) {
+        MachineInstr *useMI = mo->getParent();
+        for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++)
+          if (useMI->getOperand(i).isReg() && useMI->getOperand(i).getReg() &&
+              useMI->getOperand(i).isDef())
+            unallocableRegs.insert(useMI->getOperand(i).getReg());
+      });
+
+      LiveIntervalIdem *interval = new LiveIntervalIdem;
+
+      // indicates this interval should not be spilled out into memory.
+      interval->costToSpill = UINT32_MAX;
+
+      auto from = li->getIndex(insertedPos) - 2;
+      auto to = li->getIndex(pair.uses.back()->getParent());
+
+      interval->addRange(from, to);    // add an interval for a temporal move instr.
+      phyReg = choosePhysRegForRenaming(pair.uses[0], interval, unallocableRegs);
+
+      li->intervals.insert(std::make_pair(phyReg, interval));
+
+      assert(TargetRegisterInfo::isPhysicalRegister(phyReg));
+      assert(phyReg != pair.uses.back()->getReg());
+    }
+
+    // Now, replace all old registers used in useMI with the new register.
+    for (size_t i = 0, e = pair.uses.size() - 1; i < e; i++)
+      pair.uses[i]->setReg(phyReg);
+
+    if (twoAddrInstExits) {
       auto useMI = pair.uses.back()->getParent();
       auto mbb = useMI->getParent();
 
