@@ -45,6 +45,7 @@ public:
 
 private:
   void computeIdemLiveIns(const MachineInstr *mi);
+  void printLiveRegisters(RegSet &regs, bool liveInOrLiveOut = true);
 };
 }
 

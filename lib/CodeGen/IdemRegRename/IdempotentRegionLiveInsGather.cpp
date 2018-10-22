@@ -1,4 +1,5 @@
 #include <llvm/ADT/SetOperations.h>
+#include <llvm/Support/raw_ostream.h>
 #include "IdempotentRegionLiveInsGather.h"
 
 using namespace llvm;
@@ -64,11 +65,16 @@ void LiveInsGather::run() {
     }
   } while (changed);
 
-
+  // Print out live-in registers set for each machine basic block.
   for (auto &mbb : mf) {
+    llvm::errs()<<mbb.getName()<<", ";
+    printLiveRegisters(liveInMBBMap[&mbb]);
+    printLiveRegisters(liveOutMBBMap[&mbb], false);
     for (auto &mi : mbb) {
       if (tii->isIdemBoundary(&mi)) {
         computeIdemLiveIns(&mi);
+        llvm::errs()<<"Idem, ";
+        printLiveRegisters(idemLiveInMap[&mi]);
       }
     }
   }
@@ -96,4 +102,20 @@ void LiveInsGather::computeIdemLiveIns(const MachineInstr *mi) {
 
   // assign the live out to the idem's live in
   idemLiveInMap[mi] = liveOuts;
+}
+
+void LiveInsGather::printLiveRegisters(llvm::LiveInsGather::RegSet &regs, bool liveInOrLiveOut) {
+  size_t i = 0, e = regs.size();
+  if (liveInOrLiveOut)
+    llvm::errs()<<"LiveIns: [";
+  else
+    llvm::errs()<<"LiveOuts: [";
+  for (auto reg :  regs) {
+    llvm::errs() << tri->getName(reg);
+    if (i < e - 1)
+      llvm::errs()<<",";
+    ++i;
+  }
+
+  llvm::errs()<<"]\n";
 }
