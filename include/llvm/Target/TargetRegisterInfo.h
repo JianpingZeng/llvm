@@ -707,6 +707,9 @@ public:
   virtual int getCompactUnwindRegNum(unsigned, bool) const {
     return -1;
   }
+  /// canUsedToReplace - This function is used by IdemRegisterRenamer to check if
+  /// the specified register is legal to used.
+  virtual bool canUsedToReplace(unsigned int reg) const { return true; }
 };
 
 

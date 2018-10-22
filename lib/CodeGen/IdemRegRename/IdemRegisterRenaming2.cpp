@@ -85,17 +85,19 @@ public:
     return "Register Renaming for Idempotence pass";
   }
 
-  /*void releaseMemory() override {
+  void clear() {
+    if (gather)
+      delete gather;
+
     tii = nullptr;
     tri = nullptr;
-    delete mir;
-    reversePostOrderMBBs.clear();
-    antiDeps.clear();
     li = nullptr;
     mf = nullptr;
     mri = nullptr;
     mfi = nullptr;
-  }*/
+    reversePostOrderMBBs.clear();
+    antiDeps.clear();
+  }
 
 private:
   inline void collectLiveInRegistersForRegions();
@@ -116,7 +118,7 @@ private:
   void filterUnavailableRegs(MachineOperand *use,
                              BitVector &allocSet,
                              bool allowsAntiDep);
-  bool legalToReplace(unsigned physReg, int reg);
+  bool legalToReplace(unsigned newReg, unsigned oldReg);
   unsigned tryChooseFreeRegister(LiveIntervalIdem &interval,
                                  int useReg,
                                  BitVector &allocSet);
@@ -301,11 +303,16 @@ static void getDefUses(MachineInstr *mi,
       uses->insert(mo);
   }
 }
-
-bool IdemRegisterRenamer::legalToReplace(unsigned physReg, int reg) {
+/**
+ * Checks if it is legal to replace the oldReg with newReg. If so, return true.
+ * @param newReg
+ * @param oldReg
+ * @return
+ */
+bool IdemRegisterRenamer::legalToReplace(unsigned newReg, unsigned oldReg) {
   for (unsigned i = 0, e = tri->getNumRegClasses(); i < e; i++) {
     auto rc = tri->getRegClass(i);
-    if (rc->contains(physReg) && rc->contains(reg))
+    if (tri->canUsedToReplace(newReg) && rc->contains(newReg) && rc->contains(oldReg))
       return true;
   }
   return false;
@@ -1068,7 +1075,7 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
 
   bool changed = false;
   changed |= handleAntiDependences();
-  delete gather;
   MF.dump();
+  clear();
   return changed;
 }

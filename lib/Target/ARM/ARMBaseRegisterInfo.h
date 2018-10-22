@@ -186,6 +186,10 @@ public:
   virtual void eliminateFrameIndex(MachineBasicBlock::iterator II,
                                    int SPAdj, RegScavenger *RS = NULL) const;
 
+  /// canUsedToReplace - This function is used by IdemRegisterRenamer to check if
+  /// the specified register is legal to used.
+  virtual bool canUsedToReplace(unsigned int reg) const { return reg != ARM::LR; }
+
 private:
   unsigned getRegisterPairEven(unsigned Reg, const MachineFunction &MF) const;
 

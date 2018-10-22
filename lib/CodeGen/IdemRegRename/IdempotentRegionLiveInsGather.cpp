@@ -14,7 +14,9 @@ void LiveInsGather::run() {
     for (auto mi = mbb.rbegin(), end = mbb.rend(); mi != end; ++mi) {
       for (int j = mi->getNumOperands()-1; j >= 0; j--) {
         auto mo = mi->getOperand(j);
-        if (!mo.isReg() || !mo.getReg()) continue;
+
+        // We don't handle implicit register.
+        if (!mo.isReg() || !mo.getReg() || mo.isImplicit()) continue;
         int reg = mo.getReg();
         if (mo.isUse() && !liveKills[&mbb].count(reg))
           liveGens[&mbb].insert(reg);
@@ -90,7 +92,8 @@ void LiveInsGather::computeIdemLiveIns(const MachineInstr *mi) {
   for (auto itr = mbb->rbegin(); itr != end; ++itr) {
     for (int i = 0, e = itr->getNumOperands(); i < e; i++) {
       auto mo = itr->getOperand(i);
-      if (!mo.isReg() || !mo.getReg())
+      // We don't handle implicit register.
+      if (!mo.isReg() || !mo.getReg() || mo.isImplicit())
         continue;
 
       if (mo.isDef())
