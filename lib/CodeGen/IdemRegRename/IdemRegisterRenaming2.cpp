@@ -111,6 +111,12 @@ private:
                             std::set<MachineBasicBlock *> &,
                             std::vector<MIOp>,
                             std::vector<MIOp>);
+  void useDefChainEnds(unsigned reg,
+                       std::set<MachineBasicBlock*> &visited,
+                       MachineBasicBlock::iterator start,
+                       MachineBasicBlock::iterator end,
+                       MachineBasicBlock *mbb, bool &ends);
+
   bool isTwoAddressInstr(MachineInstr *useMI);
   unsigned choosePhysRegForRenaming(MachineOperand *use,
                                     LiveIntervalIdem *interval,
@@ -197,6 +203,37 @@ static bool contains(std::vector<MIOp> &set, unsigned reg) {
   return false;
 }
 
+void IdemRegisterRenamer::useDefChainEnds(unsigned reg,
+                                          std::set<MachineBasicBlock*> &visited,
+                                          MachineBasicBlock::iterator start,
+                                          MachineBasicBlock::iterator end,
+                                          MachineBasicBlock *mbb,
+                                          bool &ends) {
+  ends = true;
+  if (!visited.insert(mbb).second)
+    return;
+
+  if (start != end) {
+    for (; start != end; ++start) {
+      MachineInstr* mi = start;
+      if (tii->isIdemBoundary(mi))
+        return;
+
+      for (unsigned i = 0, e = mi->getNumOperands(); i < e; i++) {
+        auto mo = mi->getOperand(i);
+        if (!mo.isReg() || !mo.getReg() || mo.getReg() != reg)
+          continue;
+
+        ends = !mo.isDef();
+        return;
+      }
+    }
+  }
+  std::for_each(mbb->succ_begin(), mbb->succ_end(), [&](MachineBasicBlock *succ) {
+    useDefChainEnds(reg, visited, succ->begin(), succ->end(), succ, ends);
+  });
+}
+
 void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
                                                MachineBasicBlock::iterator idem,
                                                MachineBasicBlock::iterator end,
@@ -218,16 +255,22 @@ void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
       if (!mo.isReg() || !mo.getReg() || mo.getReg() != reg)
         continue;
 
-      if (mo.isUse()) {
-        if (contains(defs, mo.getReg())) {
+      if (mo.isUse())
+        uses.push_back(MIOp(itr, i));
+      else {
+        defs.push_back(MIOp(itr, i));
+
+        ++itr;
+        bool ends = false;
+        std::set<MachineBasicBlock*> visited;
+        useDefChainEnds(reg, visited, itr, end, mbb, ends);
+        if (ends) {
           // Construct anti-dependences according uses and defs set.
           antiDeps.push_back(AntiDeps(reg, uses, defs));
           return;
         }
-
-        uses.push_back(MIOp(itr, i));
-      } else
-        defs.push_back(MIOp(itr, i));
+        --itr;
+      }
     }
   }
 
@@ -822,9 +865,9 @@ void IdemRegisterRenamer::getUsesSetOfDef(MachineOperand *def,
   std::set<MachineBasicBlock *> visited;
   auto mbb = def->getParent()->getParent();
   walkDFSToGatheringUses(def->getReg(),
-             // Skip current mi defines the def operand, starts walk through from next mi.
-             ++MachineBasicBlock::iterator(def->getParent()),
-             mbb->end(), mbb, visited, usesAndDefs, usesInSameRegion, false);
+      // Skip current mi defines the def operand, starts walk through from next mi.
+                         ++MachineBasicBlock::iterator(def->getParent()),
+                         mbb->end(), mbb, visited, usesAndDefs, usesInSameRegion, false);
 }
 
 void IdemRegisterRenamer::collectUnallocableRegs(MachineBasicBlock::iterator idem, DenseSet<unsigned> &regs) {
@@ -845,7 +888,7 @@ void IdemRegisterRenamer::collectUnallocableRegs(MachineBasicBlock::iterator ide
       return;
     }
     if (tii->isIdemBoundary(&*idem)) {
-      std::vector<IdempotentRegion*> regions;
+      std::vector<IdempotentRegion *> regions;
       mir->getRegionsContaining(*idem, &regions);
       for (auto &r : regions) {
         auto mbb = r->getEntry().getParent();
@@ -881,20 +924,18 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     // Try to replace the old register name with other register to reduce
     // inserted move instruction.
     // If we can not find such register, than alter to insert move.
-    if (!twoAddrInstExits) {
-      // We just count on such situation that all uses are within the same region
-      // as the current region.
-      std::vector<MIOp> usesAndDef;
-      bool usesInSameRegion = false;
-      auto &miLastDef = pair.defs.back();
-      getUsesSetOfDef(&miLastDef.mi->getOperand(miLastDef.index), usesAndDef, usesInSameRegion);
 
-      // We don't replace the name of R0 in ARM and x86 architecture.
-      // Because R0 is implicitly used by return instr.
-      if (!usesInSameRegion || usesAndDef.back().mi->getParent() == &mf->back()) {
-        chooseRenaming = false;
-        goto INSERT_MOVE;
-      }
+    // We just count on such situation that all uses are within the same region
+    // as the current region.
+    std::vector<MIOp> usesAndDef;
+    bool usesInSameRegion = false;
+    auto &miLastDef = pair.defs.back();
+    getUsesSetOfDef(&miLastDef.mi->getOperand(miLastDef.index), usesAndDef, usesInSameRegion);
+    if (!twoAddrInstExits && usesInSameRegion &&
+        // We don't replace the name of R0 in ARM and x86 architecture.
+        // Because R0 is implicitly used by return instr.
+        !usesAndDef.empty() &&
+        usesAndDef.back().mi->getParent() != &mf->back()) {
 
       MachineInstr *mostFarawayMI = nullptr;
       for (auto &mo : usesAndDef) {
@@ -941,7 +982,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       }
     }
 
-    INSERT_MOVE:
     // get the free register
     unsigned phyReg = 0;
 
@@ -979,9 +1019,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       }
 
       assert(insertedPos);
-      /*mir->getRegionsContaining(*getPrevMI(insertedPos), &regions);
-      for (auto r : regions)
-        set_union(unallocableRegs, gather->getIdemLiveIns(&r->getEntry()));*/
 
       // can not assign the old register to use mi
       unallocableRegs.insert(pair.reg);
@@ -1026,17 +1063,53 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       auto useMI = pair.uses.back().mi;
       auto moIndex = pair.uses.back().index;
       auto mbb = useMI->getParent();
+      unsigned oldReg = pair.reg;
+
+      // request a new register
+      if (phyReg == 0) {
+        assert(pair.uses.size() == 1);
+
+        DenseSet<unsigned> unallocableRegs;
+        for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++) {
+          auto mo = useMI->getOperand(i);
+          if (mo.isReg() && !mo.getReg())
+            unallocableRegs.insert(mo.getReg());
+        }
+        unallocableRegs.insert(oldReg);
+
+        for (auto & r : regions) {
+          auto liveins = gather->getIdemLiveIns(&r->getEntry());
+          unallocableRegs.insert(liveins.begin(), liveins.end());
+        }
+
+        LiveIntervalIdem *interval = new LiveIntervalIdem;
+
+        // indicates this interval should not be spilled out into memory.
+        interval->costToSpill = UINT32_MAX;
+
+        auto from = li->getIndex(useMI) - 2;
+        auto to = li->getIndex(pair.uses.back().mi);
+
+        interval->addRange(from, to);    // add an interval for a temporal move instr.
+        auto miOp = pair.uses.front();
+        phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), interval, unallocableRegs);
+
+        li->intervals.insert(std::make_pair(phyReg, interval));
+        assert(TargetRegisterInfo::isPhysicalRegister(phyReg));
+        assert(phyReg != oldReg);
+      }
 
       // Step#8: substitute the old reg with phyReg,
       // and remove other anti-dep on this use.
-      unsigned oldReg = pair.reg;
-      for (int i = 0, e = useMI->getNumOperands(); i < e; i++) {
-        auto mo = useMI->getOperand(i);
+
+      // We must insert move firstly, and than substitute the old reg with new reg.
+      tii->copyPhysReg(*mbb, useMI, DebugLoc(), phyReg, oldReg, useMI->getOperand(moIndex).isKill());
+
+      for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++) {
+        MachineOperand& mo = useMI->getOperand(i);
         if (mo.isReg() && mo.getReg() == oldReg)
           mo.setReg(phyReg);
       }
-
-      tii->copyPhysReg(*mbb, useMI, DebugLoc(), phyReg, oldReg, useMI->getOperand(moIndex).isKill());
     }
   }
 

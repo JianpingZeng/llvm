@@ -11,13 +11,14 @@ void LiveInsGather::run() {
     liveGens[&mbb] = RegSet();
     liveKills[&mbb] = RegSet();
 
-    for (auto mi = mbb.rbegin(), end = mbb.rend(); mi != end; ++mi) {
-      for (int j = mi->getNumOperands()-1; j >= 0; j--) {
+    llvm::errs()<<mbb.getName()<<"\n";
+
+    for (auto mi = mbb.begin(), end = mbb.end(); mi != end; ++mi) {
+      for (int j = mi->getNumOperands() - 1; j >= 0; j--) {
         auto mo = mi->getOperand(j);
 
-        // We don't handle implicit register.
-        if (!mo.isReg() || !mo.getReg() || mo.isImplicit()) continue;
-        int reg = mo.getReg();
+        if (!mo.isReg() || !mo.getReg()) continue;
+        unsigned reg = mo.getReg();
         if (mo.isUse() && !liveKills[&mbb].count(reg))
           liveGens[&mbb].insert(reg);
         else
@@ -58,8 +59,8 @@ void LiveInsGather::run() {
       if (changed)
         liveOutMBBMap[&*mbb] = out;
 
-      auto in = liveOutMBBMap[&*mbb];
-      set_intersect(in, liveKills[&*mbb]);
+      auto in = out;
+      set_subtract(in, liveKills[&*mbb]);
       set_union(in, liveGens[&*mbb]);
       changed = !RegSetEq(in, liveInMBBMap[&*mbb]);
       if (changed)
@@ -92,8 +93,8 @@ void LiveInsGather::computeIdemLiveIns(const MachineInstr *mi) {
   for (auto itr = mbb->rbegin(); itr != end; ++itr) {
     for (int i = 0, e = itr->getNumOperands(); i < e; i++) {
       auto mo = itr->getOperand(i);
-      // We don't handle implicit register.
-      if (!mo.isReg() || !mo.getReg() || mo.isImplicit())
+
+      if (!mo.isReg() || !mo.getReg())
         continue;
 
       if (mo.isDef())
