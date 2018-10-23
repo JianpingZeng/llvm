@@ -1,6 +1,4 @@
-#include <utility>
-
-//===----- IdemRegisterRenaming.cpp - Register regnaming after RA ---------===//
+//===----- IdemRegisterRenaming.cpp - Register Renaming after RA ---------===//
 //
 //                     The LLVM Compiler Infrastructure
 //
@@ -31,6 +29,7 @@
 #include "LiveIntervalAnalysisIdem.h"
 
 #include <queue>
+#include <utility>
 using namespace llvm;
 
 /// @author Jianping Zeng.
@@ -48,6 +47,10 @@ struct MIOp {
   }
 
   MIOp(MachineInstr *MI, unsigned Index) : mi(MI), index(Index) {}
+
+  bool operator ==(MIOp &rhs) {
+    return mi == rhs.mi && index == rhs.index;
+  }
 };
 
 struct AntiDeps {
@@ -830,6 +833,7 @@ void IdemRegisterRenamer::walkDFSToGatheringUses(unsigned reg,
 
   for (; begin != end; ++begin) {
     auto mi = begin;
+    bool isTwoAddr = isTwoAddressInstr(mi);
     if (tii->isIdemBoundary(mi)) {
       seeIdem = true;
       continue;
@@ -838,12 +842,34 @@ void IdemRegisterRenamer::walkDFSToGatheringUses(unsigned reg,
     // when walk through operands, use opr first!
     for (int i = mi->getNumOperands() - 1; i >= 0; i--) {
       auto mo = mi->getOperand(i);
-      if (mo.isReg() && /*mo.isUse() &&*/ mo.getReg() == reg) {
-        if (seeIdem || tii->isReturnInstr(mi)) {
+      if (!mo.isReg() || !mo.getReg() || mo.getReg() != reg)
+        continue;
+      if (mo.isUse()) {
+        // We can't handle such case (the number of predecessor are greater than 1)
+        //                 ... = %R0
+        //                 /        \
+        //               /           \
+        //        ... = %R0          BB3
+        //     %R0 = ADD %R0, #1      /
+        // %R2, %R0 = LDR_INC, %R0   /
+        //              \           /
+        //               \        /
+        //              %R0 = ADD %R0, #1
+        //              BX_RET %R0                <------ current mbb
+        // we can't replace R0 in current mbb with R3, which will cause
+        // wrong semantics when program reach current mbb along with BB3
+        if (seeIdem || tii->isReturnInstr(mi) || mbb->pred_size() > 1) {
           canReplace = false;
           return;
         } else
           usesAndDefs.push_back(MIOp(mi, i));
+      }
+      else {
+        // mo.isDef()
+        if (isTwoAddr)
+          usesAndDefs.push_back(MIOp(mi, i));
+        else
+          return;
       }
     }
   }
@@ -872,8 +898,8 @@ void IdemRegisterRenamer::getUsesSetOfDef(MachineOperand *def,
   auto mbb = def->getParent()->getParent();
   walkDFSToGatheringUses(def->getReg(),
       // Skip current mi defines the def operand, starts walk through from next mi.
-                         ++MachineBasicBlock::iterator(def->getParent()),
-                         mbb->end(), mbb, visited, usesAndDefs, canReplace, false);
+      ++MachineBasicBlock::iterator(def->getParent()),
+      mbb->end(), mbb, visited, usesAndDefs, canReplace, false);
 }
 
 void IdemRegisterRenamer::collectUnallocableRegs(MachineBasicBlock::iterator idem, DenseSet<unsigned> &regs) {
@@ -1158,6 +1184,16 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         MachineOperand& mo = useMI->getOperand(i);
         if (mo.isReg() && mo.getReg() == oldReg)
           mo.setReg(phyReg);
+      }
+    }
+
+    // cope with other anti-dependence pair caused by inserting such move.
+    for (auto itr = antiDeps.begin(), end = antiDeps.end(); itr != end; ++itr) {
+      AntiDeps ad = *itr;
+      if (ad.uses.front() == pair.uses.front()) {
+        antiDeps.erase(itr);
+        for (auto op : ad.uses)
+          op.mi->getOperand(op.index).setReg(phyReg);
       }
     }
 
