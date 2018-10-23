@@ -904,16 +904,15 @@ void IdemRegisterRenamer::getUsesSetOfDef(MachineOperand *def,
 
 void IdemRegisterRenamer::collectUnallocableRegs(MachineBasicBlock::iterator idem, DenseSet<unsigned> &regs) {
   MachineBasicBlock *mbb = idem->getParent();
-  if (!mbb)
+  if (!mbb || mbb->empty())
     return;
 
   do {
     // the first instr.
     if (idem == mbb->front()) {
-      if (mbb->pred_empty()) {
+      if (mbb->pred_empty())
         regs.insert(mbb->livein_begin(), mbb->livein_end());
-        return;
-      } else {
+      else {
         for (auto itr = mbb->pred_begin(), end = mbb->pred_end(); itr != end; ++itr)
           collectUnallocableRegs((*itr)->end(), regs);
       }
@@ -1136,6 +1135,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         auto to = li->getIndex(pair.uses.back().mi);
 
         interval.addRange(from, to);    // add an interval for a temporal move instr.
+        useMO.mi->dump();
         phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), &interval, unallocableRegs);
       }
 
