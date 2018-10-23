@@ -965,16 +965,41 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     getUsesSetOfDef(&miLastDef.mi->getOperand(miLastDef.index), usesAndDef, canReplace);
 
     // If the current reg is used in ret instr, we can't replace it.
-    if (!twoAddrInstExits && canReplace &&
-        // We don't replace the name of R0 in ARM and x86 architecture.
-        // Because R0 is implicitly used by return instr.
-        !usesAndDef.empty()) {
+    if (!twoAddrInstExits && canReplace) {
+      // We don't replace the name of R0 in ARM and x86 architecture.
+      // Because R0 is implicitly used by return instr.
 
       MachineInstr *mostFarawayMI = nullptr;
       for (auto &mo : usesAndDef) {
         if (!mostFarawayMI || (&*mo.mi != mostFarawayMI &&
             li->getIndex(mo.mi) > li->getIndex(mostFarawayMI)))
           mostFarawayMI = mo.mi;
+      }
+
+      // If the last def don't have any uses
+      if (usesAndDef.empty()) {
+        auto mbb = miLastDef.mi->getParent();
+        mostFarawayMI = &mbb->back();
+        std::vector<MachineBasicBlock*> worklist;
+        std::set<MachineBasicBlock*> visited;
+        std::for_each(mbb->succ_begin(), mbb->succ_end(), [&](MachineBasicBlock *succ) {
+          worklist.push_back(succ);
+        });
+
+        while (!worklist.empty()) {
+          mbb = worklist.back();
+          worklist.pop_back();
+          if (!visited.insert(mbb).second)
+            continue;
+
+          if (!mbb->empty()) {
+            if (li->getIndex(&mbb->back()) > li->getIndex(mostFarawayMI))
+              mostFarawayMI = &mbb->back();
+          }
+          std::for_each(mbb->succ_begin(), mbb->succ_end(), [&](MachineBasicBlock *succ) {
+            worklist.push_back(succ);
+          });
+        }
       }
 
       assert(mostFarawayMI);
