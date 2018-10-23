@@ -968,8 +968,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     if (!twoAddrInstExits && canReplace &&
         // We don't replace the name of R0 in ARM and x86 architecture.
         // Because R0 is implicitly used by return instr.
-        !usesAndDef.empty() &&
-        usesAndDef.back().mi->getParent() != &mf->back()) {
+        !usesAndDef.empty()) {
 
       MachineInstr *mostFarawayMI = nullptr;
       for (auto &mo : usesAndDef) {
@@ -1027,6 +1026,28 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         // Finish replacing, skip following inserting move instr.
         li->releaseMemory();
         li->runOnMachineFunction(*mf);
+
+        // Before:
+        // 	IDEM
+        //  R0 = R0 + R1
+        //  R0 = R0 + 1
+        //  ret R0
+        //
+        // After:
+        // 	IDEM
+        //  R2 = R0 + R1
+        //  R0 = R2 + 1
+        //  ret R0
+        //
+        // The anti-dependence on R0 also remains.
+        unsigned oldReg = pair.reg;
+        for (auto &r : regions) {
+          auto begin = ++MachineBasicBlock::iterator(r->getEntry());
+          collectAntiDepsTrace(oldReg, begin, r->getEntry().getParent()->end(),
+                               r->getEntry().getParent(),
+                               std::vector<MIOp>(),
+                               std::vector<MIOp>());
+        }
         continue;
       }
     }
@@ -1190,7 +1211,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     // cope with other anti-dependence pair caused by inserting such move.
     for (auto itr = antiDeps.begin(), end = antiDeps.end(); itr != end; ++itr) {
       AntiDeps ad = *itr;
-      if (ad.uses.front() == pair.uses.front()) {
+      if (ad.uses.front() == pair.uses.front() && ad.reg == pair.reg) {
         antiDeps.erase(itr); // just remove it.
         /*for (auto op : ad.uses)
           op.mi->getOperand(op.index).setReg(phyReg);*/
