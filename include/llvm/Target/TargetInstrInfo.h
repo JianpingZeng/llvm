@@ -823,6 +823,9 @@ public:
   breakPartialRegDependency(MachineBasicBlock::iterator MI, unsigned OpNum,
                             const TargetRegisterInfo *TRI) const {}
 
+  /// isReturnInstr - Jianping Zeng for idempotence
+  virtual bool isReturnInstr(MachineInstr *MI) const { return false; }
+
 private:
   int CallFrameSetupOpcode, CallFrameDestroyOpcode;
 };

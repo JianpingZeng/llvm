@@ -224,6 +224,10 @@ public:
   getExecutionDomain(const MachineInstr *MI) const;
   void setExecutionDomain(MachineInstr *MI, unsigned Domain) const;
 
+  bool isReturnInstr(MachineInstr *MI) const override {
+    return MI->getOpcode() == ARM::BX_RET;
+  }
+
 private:
   unsigned getInstBundleLength(const MachineInstr *MI) const;
 

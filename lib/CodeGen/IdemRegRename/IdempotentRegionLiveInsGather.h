@@ -37,7 +37,7 @@ public:
 
   void run();
 
-  RegSet getIdemLiveIns(MachineInstr *mi) {
+  RegSet &getIdemLiveIns(MachineInstr *mi) {
     assert(mi && tii->isIdemBoundary(mi));
     assert(idemLiveInMap.count(mi));
     return idemLiveInMap[mi];

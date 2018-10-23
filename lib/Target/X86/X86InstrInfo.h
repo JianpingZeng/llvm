@@ -366,6 +366,10 @@ public:
                              const MachineInstr *DefMI, unsigned DefIdx,
                              const MachineInstr *UseMI, unsigned UseIdx) const;
 
+  bool isReturnInstr(MachineInstr *MI) const override {
+    return MI->getOpcode() >= X86::RET && MI->getOpcode() <= X86::REX64_PREFIX;
+  }
+
 private:
   MachineInstr * convertToThreeAddressWithLEA(unsigned MIOpc,
                                               MachineFunction::iterator &MFI,
