@@ -188,7 +188,21 @@ public:
 
   /// canUsedToReplace - This function is used by IdemRegisterRenamer to check if
   /// the specified register is legal to used.
-  virtual bool canUsedToReplace(unsigned int reg) const { return reg != ARM::LR; }
+  bool canUsedToReplace(unsigned int reg) const override { return reg != ARM::LR; }
+
+  /// isNotCountedAsLiveness - This function checks if the specified register
+  /// should be counted or not when computing liveness.
+  bool isNotCountedAsLiveness(unsigned int reg) const override {
+    switch (reg) {
+    case ARM::SP:
+    case ARM::PC:
+    case ARM::CPSR:
+    case ARM::APSR:
+      return true;
+
+    default:return false;
+    }
+  }
 
 private:
   unsigned getRegisterPairEven(unsigned Reg, const MachineFunction &MF) const;

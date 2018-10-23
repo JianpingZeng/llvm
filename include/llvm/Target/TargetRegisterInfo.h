@@ -710,6 +710,10 @@ public:
   /// canUsedToReplace - This function is used by IdemRegisterRenamer to check if
   /// the specified register is legal to used.
   virtual bool canUsedToReplace(unsigned int reg) const { return true; }
+
+  /// isNotCountedAsLiveness - This function checks if the specified register
+  /// should be counted or not when computing liveness.
+  virtual bool isNotCountedAsLiveness(unsigned int reg) const { return false; }
 };
 
 

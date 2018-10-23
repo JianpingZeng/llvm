@@ -245,8 +245,6 @@ void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
                                                MachineBasicBlock *mbb,
                                                std::vector<MIOp> uses,
                                                std::vector<MIOp> defs) {
-  llvm::errs()<<mbb->getName()<<"\n";
-
   for (auto itr = idem; itr != end; ++itr) {
     if (tii->isIdemBoundary(itr))
       return;
