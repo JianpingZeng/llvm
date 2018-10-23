@@ -11,23 +11,26 @@
 
 #define DEBUG_TYPE "reg-renaming"
 
-#include <llvm/PassSupport.h>
+
 #include <llvm/CodeGen/MachineIdempotentRegions.h>
-#include <queue>
-#include <llvm/ADT/SetOperations.h>
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
 #include "llvm/CodeGen/MachineInstrBuilder.h"
 #include "llvm/CodeGen/MachineBasicBlock.h"
 #include "llvm/CodeGen/MachineOperand.h"
-#include "LiveIntervalAnalysisIdem.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
-#include "llvm/Target/TargetData.h"
+#include "llvm/CodeGen/MachineDominators.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/STLExtras.h"
+#include <llvm/ADT/SetOperations.h>
+#include "llvm/Target/TargetData.h"
+#include <llvm/PassSupport.h>
+
 #include "IdemUtil.h"
 #include "IdempotentRegionLiveInsGather.h"
+#include "LiveIntervalAnalysisIdem.h"
 
+#include <queue>
 using namespace llvm;
 
 /// @author Jianping Zeng.
@@ -77,6 +80,7 @@ public:
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<LiveIntervalAnalysisIdem>();
     AU.addRequired<MachineIdempotentRegions>();
+    AU.addRequired<MachineDominatorTree>();
     AU.setPreservesAll();
     MachineFunctionPass::getAnalysisUsage(AU);
   }
@@ -108,7 +112,6 @@ private:
                             MachineBasicBlock::iterator,
                             MachineBasicBlock::iterator,
                             MachineBasicBlock *,
-                            std::set<MachineBasicBlock *> &,
                             std::vector<MIOp>,
                             std::vector<MIOp>);
   void useDefChainEnds(unsigned reg,
@@ -176,6 +179,7 @@ private:
   MachineFunction *mf;
   MachineRegisterInfo *mri;
   MachineFrameInfo *mfi;
+  MachineDominatorTree *dt;
 };
 }
 
@@ -183,6 +187,7 @@ INITIALIZE_PASS_BEGIN(IdemRegisterRenamer, "reg-renaming",
                       "Register Renaming for Idempotence", false, false)
   INITIALIZE_PASS_DEPENDENCY(LiveIntervalAnalysisIdem)
   INITIALIZE_PASS_DEPENDENCY(MachineIdempotentRegions)
+  INITIALIZE_PASS_DEPENDENCY(MachineDominatorTree)
 INITIALIZE_PASS_END(IdemRegisterRenamer, "reg-renaming",
                     "Register Renaming for Idempotence", false, false)
 
@@ -238,11 +243,9 @@ void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
                                                MachineBasicBlock::iterator idem,
                                                MachineBasicBlock::iterator end,
                                                MachineBasicBlock *mbb,
-                                               std::set<MachineBasicBlock *> &visited,
                                                std::vector<MIOp> uses,
                                                std::vector<MIOp> defs) {
-  if (!visited.insert(mbb).second)
-    return;
+  llvm::errs()<<mbb->getName()<<"\n";
 
   for (auto itr = idem; itr != end; ++itr) {
     if (tii->isIdemBoundary(itr))
@@ -276,7 +279,9 @@ void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
 
   if (mbb && !mbb->succ_empty()) {
     for (auto succ = mbb->succ_begin(), succEnd = mbb->succ_end(); succ != succEnd; ++succ) {
-      collectAntiDepsTrace(reg, (*succ)->begin(), (*succ)->end(), *succ, visited, uses, defs);
+      // Avoiding cycle walking over CFG.
+      if (!dt->dominates(*succ, mbb))
+        collectAntiDepsTrace(reg, (*succ)->begin(), (*succ)->end(), *succ, uses, defs);
     }
   }
 }
@@ -289,9 +294,8 @@ void IdemRegisterRenamer::gatherAntiDeps(MachineInstr *idem) {
   auto begin = ++MachineBasicBlock::iterator(idem);
   for (auto reg : liveIns) {
     // for an iteration of each live-in register, renew the visited set.
-    std::set<MachineBasicBlock *> visited;
     collectAntiDepsTrace(reg, begin, idem->getParent()->end(),
-                         idem->getParent(), visited,
+                         idem->getParent(),
                          std::vector<MIOp>(),
                          std::vector<MIOp>());
   }
@@ -1130,6 +1134,8 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   assert(mir && "No MachineIdempotentRegions available!");
   li = getAnalysisIfAvailable<LiveIntervalAnalysisIdem>();
   assert(li);
+
+  dt = getAnalysisIfAvailable<MachineDominatorTree>();
 
   tii = MF.getTarget().getInstrInfo();
   tri = MF.getTarget().getRegisterInfo();
