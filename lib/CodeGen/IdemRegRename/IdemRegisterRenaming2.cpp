@@ -127,6 +127,11 @@ private:
                        MachineBasicBlock *mbb, bool &ends);
 
   bool isTwoAddressInstr(MachineInstr *useMI);
+
+  unsigned assignAlternativeReg(AntiDeps &ad,
+                                std::vector<IdempotentRegion*> &regions,
+                                MachineInstr *&insertedPos);
+
   unsigned choosePhysRegForRenaming(MachineOperand *use,
                                     LiveIntervalIdem *interval,
                                     DenseSet<unsigned> &unallocableRegs);
@@ -745,6 +750,54 @@ unsigned IdemRegisterRenamer::tryChooseBlockedRegister(LiveIntervalIdem &interva
   return targetInter->reg;
 }
 
+unsigned IdemRegisterRenamer::assignAlternativeReg(AntiDeps &pair,
+                                                   std::vector<IdempotentRegion*> &regions,
+                                                   MachineInstr *&insertedPos) {
+  // We choose that insertion whose index is minimal
+  unsigned minIndex = UINT32_MAX;
+  insertedPos = nullptr;
+  auto &useMO = pair.uses.front();
+  unsigned phyReg = 0;
+  DenseSet<unsigned> unallocableRegs;
+
+  for (auto r : regions) {
+    MachineInstr &idem = r->getEntry();
+    set_union(unallocableRegs, gather->getIdemLiveIns(&idem));
+    collectUnallocableRegs(idem, unallocableRegs);
+
+    unsigned index = li->getIndex(&idem);
+    if (index < minIndex) {
+      minIndex = index;
+      insertedPos = &idem;
+    }
+  }
+
+  // can not assign the old register to use mi
+  unallocableRegs.insert(pair.reg);
+  std::for_each(pair.uses.begin(), pair.uses.end(), [&](MIOp &op) {
+    MachineInstr *useMI = op.mi;
+    for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++)
+      if (useMI->getOperand(i).isReg() && useMI->getOperand(i).getReg() &&
+          useMI->getOperand(i).isDef())
+        unallocableRegs.insert(useMI->getOperand(i).getReg());
+  });
+
+  auto miOp = pair.uses.front();
+  LiveIntervalIdem interval;
+
+  // indicates this interval should not be spilled out into memory.
+  interval.costToSpill = UINT32_MAX;
+
+  auto from = li->getIndex(insertedPos) - 2;
+  auto to = li->getIndex(pair.uses.back().mi);
+
+  interval.addRange(from, to);    // add an interval for a temporal move instr.
+  useMO.mi->dump();
+  phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), &interval, unallocableRegs);
+
+  return phyReg;
+}
+
 unsigned IdemRegisterRenamer::choosePhysRegForRenaming(MachineOperand *use,
                                                        LiveIntervalIdem *interval,
                                                        DenseSet<unsigned> &unallocableRegs) {
@@ -1083,11 +1136,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       if (regions.empty())
         continue;
 
-      // We choose that insertion whose index is minimal
-      unsigned minIndex = UINT32_MAX;
-      MachineInstr *insertedPos = nullptr;
-      std::vector<MachineInstr *> prevRegionIdems;
-
       // We shouldn't select the free register from the following kinds:
       // 1. live-in registers of current region.
       // 2. live-in registers of prior region (move instr will be inserted at the end of prior region)
@@ -1098,52 +1146,15 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       // ...
       // R0, ... = LDR_INC R0  (two address instr)
       // we should insert a special move instr for two address instr.
-      DenseSet<unsigned> unallocableRegs;
-
-      for (auto r : regions) {
-        MachineInstr &idem = r->getEntry();
-        set_union(unallocableRegs, gather->getIdemLiveIns(&idem));
-        collectUnallocableRegs(idem, unallocableRegs);
-
-        unsigned index = li->getIndex(&idem);
-        if (index < minIndex) {
-          minIndex = index;
-          insertedPos = &idem;
-        }
-      }
-
+      MachineInstr *insertedPos = nullptr;
+      phyReg = assignAlternativeReg(pair, regions, insertedPos);
       assert(insertedPos);
-
-      // can not assign the old register to use mi
-      unallocableRegs.insert(pair.reg);
-      std::for_each(pair.uses.begin(), pair.uses.end(), [&](MIOp &op) {
-        MachineInstr *useMI = op.mi;
-        for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++)
-          if (useMI->getOperand(i).isReg() && useMI->getOperand(i).getReg() &&
-              useMI->getOperand(i).isDef())
-            unallocableRegs.insert(useMI->getOperand(i).getReg());
-      });
-
-      auto miOp = pair.uses.front();
-      {
-        LiveIntervalIdem interval;
-
-        // indicates this interval should not be spilled out into memory.
-        interval.costToSpill = UINT32_MAX;
-
-        auto from = li->getIndex(insertedPos) - 2;
-        auto to = li->getIndex(pair.uses.back().mi);
-
-        interval.addRange(from, to);    // add an interval for a temporal move instr.
-        useMO.mi->dump();
-        phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), &interval, unallocableRegs);
-      }
 
       // FIXME 10/23/2018
       // li->intervals.insert(std::make_pair(phyReg, interval));
 
       assert(TargetRegisterInfo::isPhysicalRegister(phyReg));
-      miOp = pair.uses.back();
+      auto miOp = pair.uses.back();
       unsigned oldReg = miOp.mi->getOperand(miOp.index).getReg();
       assert(phyReg != oldReg);
 
