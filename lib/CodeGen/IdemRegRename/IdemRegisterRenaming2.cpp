@@ -231,7 +231,7 @@ void IdemRegisterRenamer::useDefChainEnds(unsigned reg,
       if (tii->isIdemBoundary(mi))
         return;
 
-      for (unsigned i = 0, e = mi->getNumOperands(); i < e; i++) {
+      for (int i = mi->getNumOperands() - 1; i >= 0; i--) {
         auto mo = mi->getOperand(i);
         if (!mo.isReg() || !mo.getReg() || mo.getReg() != reg)
           continue;
@@ -1191,9 +1191,9 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     for (auto itr = antiDeps.begin(), end = antiDeps.end(); itr != end; ++itr) {
       AntiDeps ad = *itr;
       if (ad.uses.front() == pair.uses.front()) {
-        antiDeps.erase(itr);
-        for (auto op : ad.uses)
-          op.mi->getOperand(op.index).setReg(phyReg);
+        antiDeps.erase(itr); // just remove it.
+        /*for (auto op : ad.uses)
+          op.mi->getOperand(op.index).setReg(phyReg);*/
       }
     }
 
@@ -1239,7 +1239,7 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
 
   bool changed = false;
   changed |= handleAntiDependences();
-  /*MF.dump();*/
+  MF.dump();
   clear();
   return changed;
 }
