@@ -49,7 +49,7 @@ struct MIOp {
   MIOp(MachineInstr *MI, unsigned Index) : mi(MI), index(Index) {}
 
   bool operator ==(MIOp &rhs) {
-    return mi == rhs.mi && index == rhs.index;
+    return &*mi == &*rhs.mi && index == rhs.index;
   }
 };
 
@@ -128,9 +128,7 @@ private:
 
   bool isTwoAddressInstr(MachineInstr *useMI);
 
-  unsigned assignAlternativeReg(AntiDeps &ad,
-                                std::vector<IdempotentRegion*> &regions,
-                                MachineInstr *&insertedPos);
+  void spillCurrentUse(AntiDeps &ad);
 
   unsigned choosePhysRegForRenaming(MachineOperand *use,
                                     LiveIntervalIdem *interval,
@@ -179,6 +177,8 @@ private:
                               bool seeIdem);
 
   void collectUnallocableRegs(MachineBasicBlock::iterator idem, DenseSet<unsigned> &regs);
+
+  unsigned getNumFreeRegs(unsigned reg, DenseSet<unsigned> &unallocableRegs);
 
 private:
   const TargetInstrInfo *tii;
@@ -750,52 +750,64 @@ unsigned IdemRegisterRenamer::tryChooseBlockedRegister(LiveIntervalIdem &interva
   return targetInter->reg;
 }
 
-unsigned IdemRegisterRenamer::assignAlternativeReg(AntiDeps &pair,
-                                                   std::vector<IdempotentRegion*> &regions,
-                                                   MachineInstr *&insertedPos) {
-  // We choose that insertion whose index is minimal
-  unsigned minIndex = UINT32_MAX;
-  insertedPos = nullptr;
-  auto &useMO = pair.uses.front();
-  unsigned phyReg = 0;
-  DenseSet<unsigned> unallocableRegs;
+/**
+ * Backwardly explores all reachable defs of the specified {@code reg} from mi position.
+ * @param mi
+ * @param reg
+ * @param defs
+ */
+static void findAllReachableDefs(MachineBasicBlock::reverse_iterator begin,
+                                 MachineBasicBlock::reverse_iterator end,
+                                 MachineBasicBlock *mbb, unsigned reg,
+                                 std::vector<MachineInstr*> &defs,
+                                 std::set<MachineBasicBlock*> &visited) {
+  if (!mbb || !visited.insert(mbb).second)
+    return;
 
-  for (auto r : regions) {
-    MachineInstr &idem = r->getEntry();
-    set_union(unallocableRegs, gather->getIdemLiveIns(&idem));
-    collectUnallocableRegs(idem, unallocableRegs);
+  for (; begin != end; ++begin) {
+    MachineInstr& mi = *begin;
+    for (unsigned i = 0, e = mi.getNumOperands(); i < e; i++) {
+      auto mo = mi.getOperand(i);
+      if (!mo.isReg() || mo.getReg() != reg || !mo.isDef())
+        continue;
 
-    unsigned index = li->getIndex(&idem);
-    if (index < minIndex) {
-      minIndex = index;
-      insertedPos = &idem;
+      defs.push_back(&mi);
+      return;
     }
   }
 
-  // can not assign the old register to use mi
-  unallocableRegs.insert(pair.reg);
-  std::for_each(pair.uses.begin(), pair.uses.end(), [&](MIOp &op) {
-    MachineInstr *useMI = op.mi;
-    for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++)
-      if (useMI->getOperand(i).isReg() && useMI->getOperand(i).getReg() &&
-          useMI->getOperand(i).isDef())
-        unallocableRegs.insert(useMI->getOperand(i).getReg());
+  std::for_each(mbb->pred_begin(), mbb->pred_end(), [&](MachineBasicBlock *pred) {
+    findAllReachableDefs(pred->rbegin(), pred->rend(), pred, reg, defs, visited);
   });
+}
 
-  auto miOp = pair.uses.front();
-  LiveIntervalIdem interval;
+void IdemRegisterRenamer::spillCurrentUse(AntiDeps &pair) {
 
-  // indicates this interval should not be spilled out into memory.
-  interval.costToSpill = UINT32_MAX;
+  // spill indicates if we have to spill current useMO when
+  // tehre is no other free or blocked register available.
+  auto useMO = pair.uses.front();
 
-  auto from = li->getIndex(insertedPos) - 2;
-  auto to = li->getIndex(pair.uses.back().mi);
+  // Program reach here indicates we can't find any free or blocked register to be used as
+  // inserting move instruction.
+  std::vector<MachineInstr*> defs;
+  std::set<MachineBasicBlock*> visited;
+  findAllReachableDefs(++MachineBasicBlock::reverse_iterator(useMO.mi),
+      useMO.mi->getParent()->rend(),
+      useMO.mi->getParent(),
+      pair.reg, defs, visited);
 
-  interval.addRange(from, to);    // add an interval for a temporal move instr.
-  useMO.mi->dump();
-  phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), &interval, unallocableRegs);
+  const TargetRegisterClass *rc = tri->getMinimalPhysRegClass(pair.reg);
 
-  return phyReg;
+  int slotFI = mfi->CreateSpillStackObject(rc->getSize(), rc->getAlignment());
+  for (auto &def : defs) {
+    assert(def != def->getParent()->end());
+    auto pos = ++MachineBasicBlock::iterator(def);
+    tii->storeRegToStackSlot(*def->getParent(), pos, pair.reg, true, slotFI, rc, tri);
+  }
+
+  // Insert a load instruction before the first use.
+  auto pos = useMO.mi;
+  tii->loadRegFromStackSlot(*pos->getParent(), pos, pair.reg, slotFI, rc, tri);
 }
 
 unsigned IdemRegisterRenamer::choosePhysRegForRenaming(MachineOperand *use,
@@ -833,7 +845,8 @@ unsigned IdemRegisterRenamer::choosePhysRegForRenaming(MachineOperand *use,
     }
   }*/
 
-  assert(freeReg && "can not to rename the specified register!");
+  if (!freeReg) return 0;
+  /*assert(freeReg && "can not to rename the specified register!");*/
   interval->reg = freeReg;
   li->insertOrCreateInterval(freeReg, interval);
   return freeReg;
@@ -898,19 +911,21 @@ void IdemRegisterRenamer::walkDFSToGatheringUses(unsigned reg,
       if (!mo.isReg() || !mo.getReg() || mo.getReg() != reg)
         continue;
       if (mo.isUse()) {
-        // We can't handle such case (the number of predecessor are greater than 1)
-        //                 ... = %R0
-        //                 /        \
-        //               /           \
-        //        ... = %R0          BB3
-        //     %R0 = ADD %R0, #1      /
-        // %R2, %R0 = LDR_INC, %R0   /
-        //              \           /
-        //               \        /
-        //              %R0 = ADD %R0, #1
-        //              BX_RET %R0                <------ current mbb
-        // we can't replace R0 in current mbb with R3, which will cause
-        // wrong semantics when program reach current mbb along with BB3
+        /*
+         * We can't handle such case (the number of predecessor are greater than 1)
+         *                 ... = %R0
+         *                 /        \
+         *               /           \
+         *        ... = %R0          BB3
+         *     %R0 = ADD %R0, #1      /
+         * %R2, %R0 = LDR_INC, %R0   /
+         *              \           /
+         *               \        /
+         *              %R0 = ADD %R0, #1
+         *              BX_RET %R0                <------ current mbb
+         * we can't replace R0 in current mbb with R3, which will cause
+         * wrong semantics when program reach current mbb along with BB3
+         */
         if (seeIdem || tii->isReturnInstr(mi) || mbb->pred_size() > 1) {
           canReplace = false;
           return;
@@ -962,7 +977,7 @@ void IdemRegisterRenamer::collectUnallocableRegs(MachineBasicBlock::iterator ide
 
   do {
     // the first instr.
-    if (idem == mbb->front()) {
+    if (&*idem == &mbb->front()) {
       if (mbb->pred_empty())
         regs.insert(mbb->livein_begin(), mbb->livein_end());
       else {
@@ -982,6 +997,22 @@ void IdemRegisterRenamer::collectUnallocableRegs(MachineBasicBlock::iterator ide
     }
     --idem;
   } while (true);
+}
+
+
+unsigned IdemRegisterRenamer::getNumFreeRegs(unsigned reg, DenseSet<unsigned> &unallocableRegs) {
+  auto allocSet = tri->getAllocatableSet(*mf);
+
+  // Remove some registers are not available when making decision of choosing.
+  for (unsigned i = 0, e = allocSet.size(); i < e; i++)
+    if (allocSet[i] && unallocableRegs.count(i))
+      allocSet.reset(i);
+  unsigned res = 0;
+  for (int r = allocSet.find_first(); r >= 0; r = allocSet.find_next(r)) {
+    if (r != 0 && legalToReplace(r, res))
+      ++res;
+  }
+  return res;
 }
 
 bool IdemRegisterRenamer::handleAntiDependences() {
@@ -1147,14 +1178,79 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       // R0, ... = LDR_INC R0  (two address instr)
       // we should insert a special move instr for two address instr.
       MachineInstr *insertedPos = nullptr;
-      phyReg = assignAlternativeReg(pair, regions, insertedPos);
+      unsigned minIndex = UINT32_MAX;
+      insertedPos = nullptr;
+      auto &useMO = pair.uses.front();
+      unsigned phyReg = 0;
+      DenseSet<unsigned> unallocableRegs;
+
+      for (auto r : regions) {
+        MachineInstr &idem = r->getEntry();
+        set_union(unallocableRegs, gather->getIdemLiveIns(&idem));
+        collectUnallocableRegs(idem, unallocableRegs);
+
+        unsigned index = li->getIndex(&idem);
+        if (index < minIndex) {
+          minIndex = index;
+          insertedPos = &idem;
+        }
+      }
+
+      // can not assign the old register to use mi
+      unallocableRegs.insert(pair.reg);
+      std::for_each(pair.uses.begin(), pair.uses.end(), [&](MIOp &op) {
+        MachineInstr *useMI = op.mi;
+        for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++)
+          if (useMI->getOperand(i).isReg() && useMI->getOperand(i).getReg() &&
+              useMI->getOperand(i).isDef())
+            unallocableRegs.insert(useMI->getOperand(i).getReg());
+      });
+
+      /**
+       * Avoiding repeatedly erase and add anti-dependence like following example.
+       * ... = R1
+       *   ...
+       * R1 = ...
+       * R3 = ...
+       *
+       * ==>
+       *
+       * ... = R3
+       *   ...
+       * R1 = ...
+       * R3 = ...
+       *
+       * It will repeat the process, we should avoid that situation.
+       */
+      if (getNumFreeRegs(pair.reg, unallocableRegs) <= 1) {
+        spillCurrentUse(pair);
+        goto UPDATE_INTERVAL;
+      }
+
+      auto miOp = pair.uses.front();
+      LiveIntervalIdem interval;
+
+      // indicates this interval should not be spilled out into memory.
+      interval.costToSpill = UINT32_MAX;
+
+      auto from = li->getIndex(insertedPos) - 2;
+      auto to = li->getIndex(pair.uses.back().mi);
+
+      interval.addRange(from, to);    // add an interval for a temporal move instr.
+      phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), &interval, unallocableRegs);
+
+      if (!phyReg) {
+        spillCurrentUse(pair);
+        goto UPDATE_INTERVAL;
+      }
+
       assert(insertedPos);
 
       // FIXME 10/23/2018
       // li->intervals.insert(std::make_pair(phyReg, interval));
 
       assert(TargetRegisterInfo::isPhysicalRegister(phyReg));
-      auto miOp = pair.uses.back();
+      miOp = pair.uses.back();
       unsigned oldReg = miOp.mi->getOperand(miOp.index).getReg();
       assert(phyReg != oldReg);
 
@@ -1225,6 +1321,11 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         auto miOp = pair.uses.front();
         phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), &interval, unallocableRegs);
 
+        if (!phyReg) {
+          spillCurrentUse(pair);
+          goto UPDATE_INTERVAL;
+        }
+
         // FIXME 10/23/2018
         // li->intervals.insert(std::make_pair(phyReg, interval));
         assert(TargetRegisterInfo::isPhysicalRegister(phyReg));
@@ -1247,13 +1348,16 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     // cope with other anti-dependence pair caused by inserting such move.
     for (auto itr = antiDeps.begin(), end = antiDeps.end(); itr != end; ++itr) {
       AntiDeps ad = *itr;
-      if (ad.uses.front() == pair.uses.front() && ad.reg == pair.reg) {
+      if (ad.uses.empty() || ad.defs.empty())
+        antiDeps.erase(itr);
+      else if (ad.uses.front() == pair.uses.front() && ad.reg == pair.reg) {
         antiDeps.erase(itr); // just remove it.
         /*for (auto op : ad.uses)
           op.mi->getOperand(op.index).setReg(phyReg);*/
       }
     }
 
+  UPDATE_INTERVAL:
     // FIXME, use an lightweight method to update LiveIntervalAnalysisIdem
     li->releaseMemory();
     li->runOnMachineFunction(*mf);
@@ -1296,6 +1400,7 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
 
   bool changed = false;
   changed |= handleAntiDependences();
+  llvm::errs() << "After renaming2: \n";
   MF.dump();
   clear();
   return changed;
