@@ -176,9 +176,29 @@ private:
                               bool &canReplace,
                               bool seeIdem);
 
-  void collectUnallocableRegs(MachineBasicBlock::iterator idem, DenseSet<unsigned> &regs);
+  void collectUnallocableRegs(MachineBasicBlock::reverse_iterator begin,
+                              MachineBasicBlock::reverse_iterator end,
+                              MachineBasicBlock *mbb,
+                              std::set<MachineBasicBlock*> &visited,
+                              DenseSet<unsigned> &regs);
 
   unsigned getNumFreeRegs(unsigned reg, DenseSet<unsigned> &unallocableRegs);
+
+  bool shouldSpillCurrent(AntiDeps &ad,
+                          DenseSet<unsigned> &unallocableRegs,
+                          std::vector<IdempotentRegion *> &regions);
+
+  void willRenameCauseOtherAntiDep(MachineBasicBlock::iterator begin,
+                                   MachineBasicBlock::iterator end, MachineBasicBlock *mbb,
+                                   unsigned reg, std::set<MachineBasicBlock *> &visited,
+                                   bool &canRename);
+
+  void updateLiveInOfPriorRegions(MachineBasicBlock::reverse_iterator begin,
+                                  MachineBasicBlock::reverse_iterator end,
+                                  MachineBasicBlock *mbb,
+                                  std::set<MachineBasicBlock*> &visited,
+                                  unsigned useReg,
+                                  bool &seenRedef);
 
 private:
   const TargetInstrInfo *tii;
@@ -796,18 +816,20 @@ void IdemRegisterRenamer::spillCurrentUse(AntiDeps &pair) {
       useMO.mi->getParent(),
       pair.reg, defs, visited);
 
-  const TargetRegisterClass *rc = tri->getMinimalPhysRegClass(pair.reg);
+  if (!defs.empty()) {
+    const TargetRegisterClass *rc = tri->getMinimalPhysRegClass(pair.reg);
 
-  int slotFI = mfi->CreateSpillStackObject(rc->getSize(), rc->getAlignment());
-  for (auto &def : defs) {
-    assert(def != def->getParent()->end());
-    auto pos = ++MachineBasicBlock::iterator(def);
-    tii->storeRegToStackSlot(*def->getParent(), pos, pair.reg, true, slotFI, rc, tri);
+    int slotFI = mfi->CreateSpillStackObject(rc->getSize(), rc->getAlignment());
+    for (auto &def : defs) {
+      assert(def != def->getParent()->end());
+      auto pos = ++MachineBasicBlock::iterator(def);
+      tii->storeRegToStackSlot(*def->getParent(), pos, pair.reg, true, slotFI, rc, tri);
+    }
+
+    // Insert a load instruction before the first use.
+    auto pos = useMO.mi;
+    tii->loadRegFromStackSlot(*pos->getParent(), pos, pair.reg, slotFI, rc, tri);
   }
-
-  // Insert a load instruction before the first use.
-  auto pos = useMO.mi;
-  tii->loadRegFromStackSlot(*pos->getParent(), pos, pair.reg, slotFI, rc, tri);
 }
 
 unsigned IdemRegisterRenamer::choosePhysRegForRenaming(MachineOperand *use,
@@ -970,35 +992,31 @@ void IdemRegisterRenamer::getUsesSetOfDef(MachineOperand *def,
       mbb->end(), mbb, visited, usesAndDefs, canReplace, false);
 }
 
-void IdemRegisterRenamer::collectUnallocableRegs(MachineBasicBlock::iterator idem, DenseSet<unsigned> &regs) {
-  MachineBasicBlock *mbb = idem->getParent();
-  if (!mbb || mbb->empty())
+void IdemRegisterRenamer::collectUnallocableRegs(MachineBasicBlock::reverse_iterator begin,
+                                                 MachineBasicBlock::reverse_iterator end,
+                                                 MachineBasicBlock *mbb,
+                                                 std::set<MachineBasicBlock*> &visited,
+                                                 DenseSet<unsigned> &regs) {
+  if (!mbb || !visited.insert(mbb).second)
     return;
 
-  do {
-    // the first instr.
-    if (&*idem == &mbb->front()) {
-      if (mbb->pred_empty())
-        regs.insert(mbb->livein_begin(), mbb->livein_end());
-      else {
-        for (auto itr = mbb->pred_begin(), end = mbb->pred_end(); itr != end; ++itr)
-          collectUnallocableRegs((*itr)->end(), regs);
-      }
-      return;
-    }
-    if (tii->isIdemBoundary(&*idem)) {
-      std::vector<IdempotentRegion *> regions;
-      mir->getRegionsContaining(*idem, &regions);
-      for (auto &r : regions) {
-        auto mbb = r->getEntry().getParent();
-        regs.insert(mbb->livein_begin(), mbb->livein_end());
-      }
-      return;
-    }
-    --idem;
-  } while (true);
-}
+  for (; begin != end; ++begin) {
+    if (tii->isIdemBoundary(&*begin)) {
+      auto liveIns = gather->getIdemLiveIns(&*begin);
+      llvm::errs()<<"Live in: [";
+      for (auto r : liveIns)
+        llvm::errs()<<tri->getName(r)<<",";
+      llvm::errs()<<"]\n";
 
+      regs.insert(liveIns.begin(), liveIns.end());
+      return;
+    }
+  }
+
+  std::for_each(mbb->pred_begin(), mbb->pred_end(), [&](MachineBasicBlock *pred){
+    collectUnallocableRegs(pred->rbegin(), pred->rend(), pred, visited, regs);
+  });
+}
 
 unsigned IdemRegisterRenamer::getNumFreeRegs(unsigned reg, DenseSet<unsigned> &unallocableRegs) {
   auto allocSet = tri->getAllocatableSet(*mf);
@@ -1009,10 +1027,95 @@ unsigned IdemRegisterRenamer::getNumFreeRegs(unsigned reg, DenseSet<unsigned> &u
       allocSet.reset(i);
   unsigned res = 0;
   for (int r = allocSet.find_first(); r >= 0; r = allocSet.find_next(r)) {
-    if (r != 0 && legalToReplace(r, res))
+    if (r != 0 && legalToReplace(r, reg))
       ++res;
   }
   return res;
+}
+
+template<typename T>
+bool isIntersect(std::vector<T> &lhs, std::vector<T> &rhs) {
+  for (auto &elt : lhs) {
+    if (std::find(rhs.begin(), rhs.end(), elt) != rhs.end())
+      return true;
+  }
+  return false;
+}
+
+bool IdemRegisterRenamer::shouldSpillCurrent(AntiDeps &ad,
+                                             DenseSet<unsigned> &unallocableRegs,
+                                             std::vector<IdempotentRegion *> &regions) {
+  // 1 for the ad which has been removed from antiDeps list.
+  unsigned numStimulateousLiveInReg = 1;
+  unsigned freeRegs = getNumFreeRegs(ad.reg, unallocableRegs);
+  std::vector<IdempotentRegion*> r;
+  for (auto &pair : antiDeps) {
+    mir->getRegionsContaining(*pair.uses.front().mi, &r);
+    if (isIntersect(regions, r))
+      ++numStimulateousLiveInReg;
+  }
+
+  return numStimulateousLiveInReg > freeRegs;
+}
+
+void IdemRegisterRenamer::willRenameCauseOtherAntiDep(MachineBasicBlock::iterator begin,
+                                                      MachineBasicBlock::iterator end,
+                                                      MachineBasicBlock *mbb,
+                                                      unsigned reg,
+                                                      std::set<MachineBasicBlock *> &visited,
+                                                      bool &canRename) {
+  if (!mbb || !visited.insert(mbb).second)
+    return;
+
+  for (; begin != end; ++begin) {
+    if (tii->isIdemBoundary(begin))
+      return;
+
+    for (int i = begin->getNumOperands() - 1; i >= 0; --i) {
+      auto mo = begin->getOperand(i);
+      if (!mo.isReg() || mo.getReg() != reg || mo.isUse())
+        continue;
+      canRename = false;
+      return;
+    }
+  }
+  std::for_each(mbb->succ_begin(), mbb->succ_end(), [&](MachineBasicBlock* succ){
+    willRenameCauseOtherAntiDep(succ->begin(), succ->end(),
+        succ, reg, visited, canRename);
+    if (!canRename)
+      return;
+  });
+}
+
+void IdemRegisterRenamer::updateLiveInOfPriorRegions(MachineBasicBlock::reverse_iterator begin,
+                                                     MachineBasicBlock::reverse_iterator end,
+                                                     MachineBasicBlock *mbb,
+                                                     std::set<MachineBasicBlock *> &visited,
+                                                     unsigned useReg,
+                                                     bool &seenRedef) {
+  if (!mbb || !visited.insert(mbb).second)
+    return;
+
+  for (; begin != end; ++begin) {
+
+    if (tii->isIdemBoundary(&*begin)) {
+      if (!seenRedef)
+        gather->getIdemLiveIns(&*begin).insert(useReg);
+    }
+    else {
+      for (unsigned i = 0, e = begin->getNumOperands(); i < e; i++) {
+        auto mo = begin->getOperand(i);
+        if (!mo.isReg() || !mo.isDef() || mo.getReg() != useReg)
+          continue;
+
+        seenRedef = true;
+      }
+    }
+  }
+
+  std::for_each(mbb->pred_begin(), mbb->pred_end(), [&](MachineBasicBlock *pred) {
+    updateLiveInOfPriorRegions(pred->rbegin(), pred->rend(), pred, visited, useReg, seenRedef);
+  });
 }
 
 bool IdemRegisterRenamer::handleAntiDependences() {
@@ -1029,6 +1132,10 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       continue;
 
     auto &useMO = pair.uses.front();
+    if (useMO.mi->getParent()->getName() == "for.inc") {
+      llvm::errs() << "for.inc\n";
+      useMO.mi->getParent()->dump();
+    }
     mir->getRegionsContaining(*useMO.mi, &regions);
 
     // get the last insertion position of previous adjacent region
@@ -1047,6 +1154,12 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     auto &miLastDef = pair.defs.back();
     getUsesSetOfDef(&miLastDef.mi->getOperand(miLastDef.index), usesAndDef, canReplace);
 
+    auto saved = miLastDef.mi;
+    std::set<MachineBasicBlock*> visited;
+    if (canReplace)
+      willRenameCauseOtherAntiDep(++saved, miLastDef.mi->getParent()->end(),
+        miLastDef.mi->getParent(), pair.reg, visited, canReplace);
+
     // If the current reg is used in ret instr, we can't replace it.
     if (!twoAddrInstExits && canReplace) {
       // We don't replace the name of R0 in ARM and x86 architecture.
@@ -1064,7 +1177,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         auto mbb = miLastDef.mi->getParent();
         mostFarawayMI = &mbb->back();
         std::vector<MachineBasicBlock*> worklist;
-        std::set<MachineBasicBlock*> visited;
+        visited.clear();
         std::for_each(mbb->succ_begin(), mbb->succ_end(), [&](MachineBasicBlock *succ) {
           worklist.push_back(succ);
         });
@@ -1187,7 +1300,10 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       for (auto r : regions) {
         MachineInstr &idem = r->getEntry();
         set_union(unallocableRegs, gather->getIdemLiveIns(&idem));
-        collectUnallocableRegs(idem, unallocableRegs);
+        auto begin = MachineBasicBlock::reverse_iterator(idem);
+        visited.clear();
+        collectUnallocableRegs(begin, idem.getParent()->rend(),
+            idem.getParent(), visited, unallocableRegs);
 
         unsigned index = li->getIndex(&idem);
         if (index < minIndex) {
@@ -1222,7 +1338,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
        *
        * It will repeat the process, we should avoid that situation.
        */
-      if (getNumFreeRegs(pair.reg, unallocableRegs) <= 1) {
+      if (shouldSpillCurrent(pair, unallocableRegs, regions)) {
         spillCurrentUse(pair);
         goto UPDATE_INTERVAL;
       }
@@ -1282,6 +1398,9 @@ bool IdemRegisterRenamer::handleAntiDependences() {
                              r->getEntry().getParent(),
                              std::vector<MIOp>(),
                              std::vector<MIOp>());
+
+        // TODO Update the live in registers for the region where insertedPos instr resides
+
       }
     }
 
