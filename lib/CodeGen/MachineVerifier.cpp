@@ -1363,7 +1363,7 @@ void MachineVerifier::verifyIdempotentRegions() {
 
   auto savedIdemPreservationMode = IdempotencePreservationMode;
   if (EnableRegisterRenaming)
-    IdempotencePreservationMode = IdempotenceOptions::VariableCF;
+    IdempotencePreservationMode = IdempotenceOptions::InvariableCF;
 
   for (MachineIdempotentRegions::const_iterator R = MIR->begin(),
        RE = MIR->end(); R != RE; ++R) {

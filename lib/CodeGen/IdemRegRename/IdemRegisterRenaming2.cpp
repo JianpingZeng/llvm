@@ -200,6 +200,12 @@ private:
                                   unsigned useReg,
                                   bool &seenRedef);
 
+  bool willRaiseAntiDep(unsigned useReg,
+                        MachineBasicBlock::iterator begin,
+                        MachineBasicBlock::iterator end,
+                        MachineBasicBlock *mbb,
+                        std::set<MachineBasicBlock *> &visited);
+
 private:
   const TargetInstrInfo *tii;
   const TargetRegisterInfo *tri;
@@ -1050,9 +1056,11 @@ bool IdemRegisterRenamer::shouldSpillCurrent(AntiDeps &ad,
   unsigned freeRegs = getNumFreeRegs(ad.reg, unallocableRegs);
   std::vector<IdempotentRegion*> r;
   for (auto &pair : antiDeps) {
-    mir->getRegionsContaining(*pair.uses.front().mi, &r);
-    if (isIntersect(regions, r))
-      ++numStimulateousLiveInReg;
+    if (!pair.uses.empty()) {
+      mir->getRegionsContaining(*pair.uses.front().mi, &r);
+      if (isIntersect(regions, r))
+        ++numStimulateousLiveInReg;
+    }
   }
 
   return numStimulateousLiveInReg > freeRegs;
@@ -1118,6 +1126,32 @@ void IdemRegisterRenamer::updateLiveInOfPriorRegions(MachineBasicBlock::reverse_
   });
 }
 
+bool IdemRegisterRenamer::willRaiseAntiDep(unsigned useReg,
+                                           MachineBasicBlock::iterator begin,
+                                           MachineBasicBlock::iterator end,
+                                           MachineBasicBlock *mbb,
+                                           std::set<MachineBasicBlock *> &visited) {
+  if (!mbb || !visited.insert(mbb).second)
+    return false;
+
+  for (; begin != end; ++begin) {
+    if (tii->isIdemBoundary(&*begin))
+      return false;
+    for (int i = 0, e = begin->getNumOperands(); i < e; i++) {
+      auto mo = begin->getOperand(i);
+      if (mo.isReg() && mo.isDef() && mo.getReg() == useReg)
+        return true;
+    }
+  }
+
+  for (auto itr = mbb->succ_begin(),succEnd = mbb->succ_end(); itr != succEnd; ++itr){
+    auto succ = *itr;
+    bool res = willRaiseAntiDep(useReg, succ->begin(), succ->end(), succ, visited);
+    if (res) return true;
+  }
+  return false;
+}
+
 bool IdemRegisterRenamer::handleAntiDependences() {
   if (antiDeps.empty())
     return false;
@@ -1132,9 +1166,8 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       continue;
 
     auto &useMO = pair.uses.front();
-    if (useMO.mi->getParent()->getName() == "for.inc") {
-      llvm::errs() << "for.inc\n";
-      useMO.mi->getParent()->dump();
+    if (antiDeps.empty()) {
+      useMO.mi->dump();
     }
     mir->getRegionsContaining(*useMO.mi, &regions);
 
@@ -1338,22 +1371,35 @@ bool IdemRegisterRenamer::handleAntiDependences() {
        *
        * It will repeat the process, we should avoid that situation.
        */
-      if (shouldSpillCurrent(pair, unallocableRegs, regions)) {
-        spillCurrentUse(pair);
-        goto UPDATE_INTERVAL;
-      }
-
       auto miOp = pair.uses.front();
-      LiveIntervalIdem interval;
 
-      // indicates this interval should not be spilled out into memory.
-      interval.costToSpill = UINT32_MAX;
+      do {
+        if (shouldSpillCurrent(pair, unallocableRegs, regions)) {
+          spillCurrentUse(pair);
+          goto UPDATE_INTERVAL;
+        }
 
-      auto from = li->getIndex(insertedPos) - 2;
-      auto to = li->getIndex(pair.uses.back().mi);
+        LiveIntervalIdem interval;
 
-      interval.addRange(from, to);    // add an interval for a temporal move instr.
-      phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), &interval, unallocableRegs);
+        // indicates this interval should not be spilled out into memory.
+        interval.costToSpill = UINT32_MAX;
+
+        auto from = li->getIndex(insertedPos) - 2;
+        auto to = li->getIndex(pair.uses.back().mi);
+
+        interval.addRange(from, to);    // add an interval for a temporal move instr.
+        phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), &interval, unallocableRegs);
+
+        visited.clear();
+        if (!phyReg)
+          break;
+
+        if (!willRaiseAntiDep(phyReg, useMO.mi,
+            useMO.mi->getParent()->end(), useMO.mi->getParent(), visited))
+          break;
+
+        unallocableRegs.insert(phyReg);
+      }while (true);
 
       if (!phyReg) {
         spillCurrentUse(pair);
@@ -1399,8 +1445,12 @@ bool IdemRegisterRenamer::handleAntiDependences() {
                              std::vector<MIOp>(),
                              std::vector<MIOp>());
 
-        // TODO Update the live in registers for the region where insertedPos instr resides
-
+        // FIXME Update the live in registers for the region where insertedPos instr resides
+        auto mbb = r->getEntry().getParent();
+        visited.clear();
+        bool seenRedef = false;
+        updateLiveInOfPriorRegions(MachineBasicBlock::reverse_iterator(r->getEntry()),
+            mbb->rend(), mbb, visited, pair.reg, seenRedef);
       }
     }
 

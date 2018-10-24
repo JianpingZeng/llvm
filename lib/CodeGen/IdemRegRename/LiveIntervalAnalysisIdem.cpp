@@ -135,12 +135,16 @@ bool UsePoint::operator< (const UsePoint rhs) const{
     if (!mo->isReg() || !mo->getReg())
       continue;
 
-    if (MO.isIdenticalTo(*mo))
+    if (&MO == mo)
       idx1 = i;
-    else if (MO.isIdenticalTo(*rhsMO))
+    else if (&MO == rhsMO)
       idx2 = i;
   }
-  assert(idx1 != -1 && idx2 != -1);
+
+
+    assert(idx1 != -1 || idx2 != -1);
+
+
   return idx1 < idx2;
 }
 
