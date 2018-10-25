@@ -131,39 +131,45 @@ void MachineIdempotentRegions::getRegionsContaining(
   Regions->clear();
 
   // Walk the CFG backwards, starting at the instruction before MI.
-  typedef std::pair<MachineBasicBlock::const_reverse_iterator,
-                    MachineBasicBlock::const_reverse_iterator> WorkItemTy;
+  typedef MachineBasicBlock::const_reverse_iterator ITR;
+  struct WorkItemTy {
+    ITR begin;
+    ITR end;
+    const MachineBasicBlock *mbb;
+    WorkItemTy(const ITR Begin, const ITR End, const MachineBasicBlock *MBB) : begin(Begin), end(End),
+                                                             mbb(MBB) {}
+  };
+
   std::vector<WorkItemTy> Worklist;
-  Worklist.push_back(std::make_pair(MachineBasicBlock::const_reverse_iterator(&MI),
-      MI.getParent()->rend()));
+  Worklist.emplace_back(ITR(&MI), MI.getParent()->rend(), MI.getParent());
 
   std::set<const MachineBasicBlock *> Visited;
   do {
-    MachineBasicBlock::const_reverse_iterator It, end;
-    tie(It, end) = Worklist.back();
+    ITR It, end;
+    It = Worklist.back().begin;
+    end = Worklist.back().end;
+    const MachineBasicBlock *mbb = Worklist.back().mbb;
     Worklist.pop_back();
-    if (It == end)
+
+    if (!Visited.insert(mbb).second)
       continue;
 
-    const MachineBasicBlock *MBB = It->getParent();
-    Visited.insert(MBB);
-
-    // Look for a region entry or the block entry, whichever comes first.
-    while (It != end && !isRegionEntry(*It))
-      It++;
-
-    // If we found a region entry, add the region and skip predecessors.
     if (It != end) {
-      Regions->push_back(&getRegionAtEntry(*It));
-      continue;
+      // Look for a region entry or the block entry, whichever comes first.
+      while (It != end && !isRegionEntry(*It))
+        It++;
+
+      // If we found a region entry, add the region and skip predecessors.
+      if (It != end) {
+        Regions->push_back(&getRegionAtEntry(*It));
+        continue;
+      }
     }
 
     // Examine predecessors.  Insert into Visited here to allow for a cycle back
     // to MI's block.
-    for (MachineBasicBlock::const_pred_iterator P = MBB->pred_begin(),
-         PE = MBB->pred_end(); P != PE; ++P)
-      if (Visited.insert(*P).second)
-        Worklist.emplace_back((*P)->rbegin(), (*P)->rend());
+    for (auto P = mbb->pred_begin(), PE = mbb->pred_end(); P != PE; ++P)
+      Worklist.emplace_back((*P)->rbegin(), (*P)->rend(), *P);
 
   } while (!Worklist.empty());
 }

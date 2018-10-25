@@ -817,7 +817,7 @@ void IdemRegisterRenamer::spillCurrentUse(AntiDeps &pair) {
   // inserting move instruction.
   std::vector<MachineInstr*> defs;
   std::set<MachineBasicBlock*> visited;
-  findAllReachableDefs(++MachineBasicBlock::reverse_iterator(useMO.mi),
+  findAllReachableDefs(MachineBasicBlock::reverse_iterator(useMO.mi),
       useMO.mi->getParent()->rend(),
       useMO.mi->getParent(),
       pair.reg, defs, visited);
@@ -1166,9 +1166,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       continue;
 
     auto &useMO = pair.uses.front();
-    if (antiDeps.empty()) {
-      useMO.mi->dump();
-    }
+
     mir->getRegionsContaining(*useMO.mi, &regions);
 
     // get the last insertion position of previous adjacent region
@@ -1262,6 +1260,20 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         unallocableRegs.insert(pair.reg);
         for (auto &r : regions) {
           set_union(unallocableRegs, gather->getIdemLiveIns(&r->getEntry()));
+        }
+
+        for (MIOp &op : usesAndDef) {
+          auto mbb = op.mi->getParent();
+          unallocableRegs.insert(mbb->livein_begin(), mbb->livein_end());
+        }
+
+        for (MIOp &op : pair.defs) {
+          auto mbb = op.mi->getParent();
+          unallocableRegs.insert(mbb->livein_begin(), mbb->livein_end());
+
+          std::for_each(mbb->pred_begin(), mbb->pred_end(), [&](MachineBasicBlock *succ){
+            unallocableRegs.insert(succ->livein_begin(), succ->livein_end());
+          });
         }
 
         phyReg = getFreeRegisterForRenaming(pair.reg, &itrvl, unallocableRegs);
