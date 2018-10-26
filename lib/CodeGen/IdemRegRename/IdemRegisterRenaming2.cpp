@@ -126,7 +126,7 @@ private:
                        MachineBasicBlock::iterator end,
                        MachineBasicBlock *mbb, bool &ends);
 
-  bool isTwoAddressInstr(MachineInstr *useMI);
+  bool isTwoAddressInstr(MachineInstr *useMI, unsigned reg);
 
   void spillCurrentUse(AntiDeps &ad);
 
@@ -328,6 +328,12 @@ void IdemRegisterRenamer::gatherAntiDeps(MachineInstr *idem) {
     return;
 
   auto begin = ++MachineBasicBlock::iterator(idem);
+  /*if (idem->getParent()->getName() == "entry") {
+    llvm::errs()<<"LiveIns: [";
+    for (auto reg : liveIns)
+      llvm::errs()<<tri->getName(reg)<<", ";
+    llvm::errs()<<"]\n";
+  }*/
   for (auto reg : liveIns) {
     // for an iteration of each live-in register, renew the visited set.
     collectAntiDepsTrace(reg, begin, idem->getParent()->end(),
@@ -345,16 +351,16 @@ void IdemRegisterRenamer::computeAntiDependenceSet() {
   }
 }
 
-bool IdemRegisterRenamer::isTwoAddressInstr(MachineInstr *useMI) {
+bool IdemRegisterRenamer::isTwoAddressInstr(MachineInstr *useMI, unsigned reg) {
   // We should not rename the two-address instruction.
-  auto MCID = useMI->getDesc();
-  int numOps = useMI->isInlineAsm() ? useMI->getNumOperands() : MCID.getNumOperands();
-  for (int i = 0; i < numOps; i++) {
+  auto mcID = useMI->getDesc();
+  int numOps = useMI->isInlineAsm() ? useMI->getNumOperands() : mcID.getNumOperands();
+  for (unsigned i = 0; i < numOps; i++) {
     unsigned destIdx;
     if (!useMI->isRegTiedToDefOperand(i, &destIdx))
       continue;
 
-    return true;
+    return useMI->getOperand(destIdx).getReg() == reg;
   }
   return false;
 }
@@ -822,20 +828,26 @@ void IdemRegisterRenamer::spillCurrentUse(AntiDeps &pair) {
       useMO.mi->getParent(),
       pair.reg, defs, visited);
 
+  int slotFI = 0;
+  const TargetRegisterClass *rc = tri->getMinimalPhysRegClass(pair.reg);
+  slotFI = mfi->CreateSpillStackObject(rc->getSize(), rc->getAlignment());
   if (!defs.empty()) {
-    const TargetRegisterClass *rc = tri->getMinimalPhysRegClass(pair.reg);
-
-    int slotFI = mfi->CreateSpillStackObject(rc->getSize(), rc->getAlignment());
     for (auto &def : defs) {
       assert(def != def->getParent()->end());
       auto pos = ++MachineBasicBlock::iterator(def);
       tii->storeRegToStackSlot(*def->getParent(), pos, pair.reg, true, slotFI, rc, tri);
     }
-
-    // Insert a load instruction before the first use.
-    auto pos = useMO.mi;
-    tii->loadRegFromStackSlot(*pos->getParent(), pos, pair.reg, slotFI, rc, tri);
   }
+  else {
+    // The reg must be the live in of entry block of the function.
+    assert(mf->front().isLiveIn(pair.reg));
+    MachineBasicBlock::iterator pos = mf->front().front();
+    tii->storeRegToStackSlot(mf->front(), pos, pair.reg, true, slotFI, rc, tri);
+  }
+
+  // Insert a load instruction before the first use.
+  auto pos = useMO.mi;
+  tii->loadRegFromStackSlot(*pos->getParent(), pos, pair.reg, slotFI, rc, tri);
 }
 
 unsigned IdemRegisterRenamer::choosePhysRegForRenaming(MachineOperand *use,
@@ -927,7 +939,7 @@ void IdemRegisterRenamer::walkDFSToGatheringUses(unsigned reg,
 
   for (; begin != end; ++begin) {
     auto mi = begin;
-    bool isTwoAddr = isTwoAddressInstr(mi);
+    bool isTwoAddr = isTwoAddressInstr(mi, reg);
     if (tii->isIdemBoundary(mi)) {
       seeIdem = true;
       continue;
@@ -1054,15 +1066,17 @@ bool IdemRegisterRenamer::shouldSpillCurrent(AntiDeps &ad,
   // 1 for the ad which has been removed from antiDeps list.
   unsigned numStimulateousLiveInReg = 1;
   unsigned freeRegs = getNumFreeRegs(ad.reg, unallocableRegs);
-  std::vector<IdempotentRegion*> r;
-  for (auto &pair : antiDeps) {
-    if (!pair.uses.empty()) {
-      mir->getRegionsContaining(*pair.uses.front().mi, &r);
-      if (isIntersect(regions, r))
-        ++numStimulateousLiveInReg;
-    }
-  }
+  // backup
+  auto savedAntiDeps = antiDeps;
+  antiDeps.clear();
 
+  std::vector<IdempotentRegion*> rs;
+  mir->getRegionsContaining(*ad.uses.front().mi, &rs);
+  for (auto r: rs)
+    gatherAntiDeps(&r->getEntry());
+
+  numStimulateousLiveInReg = antiDeps.size();
+  antiDeps = savedAntiDeps;
   return numStimulateousLiveInReg > freeRegs;
 }
 
@@ -1166,13 +1180,12 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       continue;
 
     auto &useMO = pair.uses.front();
-
     mir->getRegionsContaining(*useMO.mi, &regions);
 
     // get the last insertion position of previous adjacent region
     // or the position of prior instruction depends on if the current instr
     // is a two address instr.
-    bool twoAddrInstExits = isTwoAddressInstr(pair.uses.back().mi);
+    bool twoAddrInstExits = isTwoAddressInstr(pair.uses.back().mi, pair.reg);
 
     // Try to replace the old register name with other register to reduce
     // inserted move instruction.
@@ -1462,7 +1475,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         visited.clear();
         bool seenRedef = false;
         updateLiveInOfPriorRegions(MachineBasicBlock::reverse_iterator(r->getEntry()),
-            mbb->rend(), mbb, visited, pair.reg, seenRedef);
+                                   mbb->rend(), mbb, visited, pair.reg, seenRedef);
       }
     }
 
@@ -1527,21 +1540,24 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     }
 
     // cope with other anti-dependence pair caused by inserting such move.
-    for (auto itr = antiDeps.begin(), end = antiDeps.end(); itr != end; ++itr) {
+    /*for (auto itr = antiDeps.begin(), end = antiDeps.end(); itr != end; ++itr) {
       AntiDeps ad = *itr;
       if (ad.uses.empty() || ad.defs.empty())
         antiDeps.erase(itr);
       else if (ad.uses.front() == pair.uses.front() && ad.reg == pair.reg) {
         antiDeps.erase(itr); // just remove it.
-        /*for (auto op : ad.uses)
-          op.mi->getOperand(op.index).setReg(phyReg);*/
+        *//*for (auto op : ad.uses)
+          op.mi->getOperand(op.index).setReg(phyReg);*//*
       }
-    }
+    }*/
 
   UPDATE_INTERVAL:
     // FIXME, use an lightweight method to update LiveIntervalAnalysisIdem
     li->releaseMemory();
     li->runOnMachineFunction(*mf);
+    /*delete gather;
+    gather = new LiveInsGather(*mf);
+    gather->run();*/
   }
 
   return true;

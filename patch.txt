@@ -516,3 +516,224 @@ index 27daaf2..eb7b256 100644
  
    for (MachineIdempotentRegions::const_iterator R = MIR->begin(),
         RE = MIR->end(); R != RE; ++R) {
+diff --git a/lib/CodeGen/IdemRegRename/IdemRegisterRenaming2.cpp b/lib/CodeGen/IdemRegRename/IdemRegisterRenaming2.cpp
+index da3e6a4..16a486d 100644
+--- a/lib/CodeGen/IdemRegRename/IdemRegisterRenaming2.cpp
++++ b/lib/CodeGen/IdemRegRename/IdemRegisterRenaming2.cpp
+@@ -128,7 +128,7 @@ private:
+ 
+   bool isTwoAddressInstr(MachineInstr *useMI);
+ 
+-  void spillCurrentUse(AntiDeps &ad);
++  void spillCurrentUse(AntiDeps &pair);
+ 
+   unsigned choosePhysRegForRenaming(MachineOperand *use,
+                                     LiveIntervalIdem *interval,
+@@ -206,6 +206,13 @@ private:
+                         MachineBasicBlock *mbb,
+                         std::set<MachineBasicBlock *> &visited);
+ 
++  void collectUsesAlongOtherPath(unsigned reg,
++                                 MachineBasicBlock *insertedMBB,
++                                 MachineBasicBlock *firstDefMBB,
++                                 bool &needSpecialHandling,
++                                 std::vector<MIOp> &uses,
++                                 MachineBasicBlock *&otherMBB);
++
+ private:
+   const TargetInstrInfo *tii;
+   const TargetRegisterInfo *tri;
+@@ -1152,6 +1159,78 @@ bool IdemRegisterRenamer::willRaiseAntiDep(unsigned useReg,
+   return false;
+ }
+ 
++void IdemRegisterRenamer::collectUsesAlongOtherPath(unsigned reg,
++                                                    MachineBasicBlock *insertedMBB,
++                                                    MachineBasicBlock *firstDefMBB,
++                                                    bool &needSpecialHandling,
++                                                    std::vector<MIOp> &uses,
++                                                    MachineBasicBlock *&otherMBB) {
++  std::set<MachineBasicBlock*> visited;
++  MachineBasicBlock *tmp = nullptr;
++  {
++    typedef std::pair<MachineBasicBlock *, MachineBasicBlock *> Item;
++    std::vector<Item> worklist;
++    worklist.emplace_back(firstDefMBB, nullptr);
++
++    while (!worklist.empty()) {
++      MachineBasicBlock *cur = worklist.back().first;
++      MachineBasicBlock *prev = worklist.back().second;
++      worklist.pop_back();
++      if (!visited.insert(cur).second)
++        continue;
++
++      if (cur == insertedMBB) {
++        tmp = prev;
++        break;
++      }
++      std::for_each(cur->pred_begin(), cur->pred_end(), [&](MachineBasicBlock *pred) {
++        worklist.emplace_back(pred, cur);
++      });
++    }
++  }
++
++  if (!tmp) {
++    needSpecialHandling = false;
++    return;
++  }
++
++
++  otherMBB = *insertedMBB->succ_begin() == tmp ?
++      *(++insertedMBB->succ_begin())
++      : *insertedMBB->succ_begin();
++
++  std::vector<MachineBasicBlock*> worklist;
++  visited.clear();
++  worklist.push_back(otherMBB);
++  while (!worklist.empty()) {
++    auto cur = worklist.back();
++    worklist.pop_back();
++    if (!visited.insert(cur).second)
++      continue;
++
++    bool walkDeeply = true;
++    for (auto mi = cur->begin(), end = cur->end(); mi != end; ++mi) {
++      for (int i = 0, e = mi->getNumOperands(); i < e; i++) {
++        auto mo = mi->getOperand(i);
++        if (!mo.isReg() || mo.getReg() != reg)
++          continue;
++
++        if (mo.isDef())
++          walkDeeply = false;
++        else
++          uses.emplace_back(mi, i);
++      }
++    }
++    if (!walkDeeply)
++      continue;
++
++    worklist.insert(worklist.end(), cur->succ_begin(), cur->succ_end());
++  }
++
++  if (!uses.empty())
++    needSpecialHandling = true;
++}
++
+ bool IdemRegisterRenamer::handleAntiDependences() {
+   if (antiDeps.empty())
+     return false;
+@@ -1385,40 +1464,76 @@ bool IdemRegisterRenamer::handleAntiDependences() {
+        */
+       auto miOp = pair.uses.front();
+ 
+-      do {
+-        if (shouldSpillCurrent(pair, unallocableRegs, regions)) {
+-          spillCurrentUse(pair);
+-          goto UPDATE_INTERVAL;
+-        }
+-
++      // Get a free register using a live interval.
++      {
+         LiveIntervalIdem interval;
+ 
+         // indicates this interval should not be spilled out into memory.
+         interval.costToSpill = UINT32_MAX;
+-
+         auto from = li->getIndex(insertedPos) - 2;
+         auto to = li->getIndex(pair.uses.back().mi);
+-
+         interval.addRange(from, to);    // add an interval for a temporal move instr.
+-        phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), &interval, unallocableRegs);
+ 
+-        visited.clear();
+-        if (!phyReg)
+-          break;
++        do {
++          if (shouldSpillCurrent(pair, unallocableRegs, regions)) {
++            spillCurrentUse(pair);
++            goto UPDATE_INTERVAL;
++          }
++
++          phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), &interval, unallocableRegs);
+ 
+-        if (!willRaiseAntiDep(phyReg, useMO.mi,
+-            useMO.mi->getParent()->end(), useMO.mi->getParent(), visited))
+-          break;
++          visited.clear();
++          if (!phyReg)
++            break;
+ 
+-        unallocableRegs.insert(phyReg);
+-      }while (true);
++          if (!willRaiseAntiDep(phyReg, useMO.mi,
++                                useMO.mi->getParent()->end(), useMO.mi->getParent(), visited))
++            break;
+ 
+-      if (!phyReg) {
+-        spillCurrentUse(pair);
+-        goto UPDATE_INTERVAL;
++          unallocableRegs.insert(phyReg);
++        } while (true);
++
++        if (!phyReg) {
++          spillCurrentUse(pair);
++          goto UPDATE_INTERVAL;
++        }
+       }
+ 
++      /*
++       In some cases, we have to extend the live interval til the last use along the
++       different control flow path, fo example:
++
++                 IDEM                             <------ BB9
++                 ...
++              CMPrr R12, R1
++              /            \
++             /             \
++            v              v
++ BB10----> IDEM         R12 = COPY R1             <------ BB29
++  STRrs R12, LR, R2, 16368 /
++             \            /
++              \         /
++               \      /
++                \   /
++                 v v
++                IDEM                              <------ BB11
++
++       We can eliminate the anti-dependence on 'R12' in the region consisting of BB9 and BB29.
++       However, the live ins of BB9 will still contains R12 caused by use of R12 in BB10,
++       so that it will trigger an anti-dependenece along the path from BB0 to BB29 even
++       though there is no 'real' anti-dependence in here. We must cope with this case.
++      */
++      auto insertedMBB = insertedPos->getParent();
++      bool needSpecialHandling = false;
++      std::vector<MIOp> uses;
++      MachineBasicBlock *otherMBB = nullptr;
++      collectUsesAlongOtherPath(pair.reg, insertedMBB,
++          pair.defs.front().mi->getParent(),
++          needSpecialHandling, uses, otherMBB);
++
+       assert(insertedPos);
++      if (needSpecialHandling)
++        assert(otherMBB);
+ 
+       // FIXME 10/23/2018
+       // li->intervals.insert(std::make_pair(phyReg, interval));
+@@ -1436,6 +1551,17 @@ bool IdemRegisterRenamer::handleAntiDependences() {
+       tii->copyPhysReg(*insertedPos->getParent(), insertedPos, DebugLoc(), phyReg, oldReg,
+                        miOp.mi->getOperand(miOp.index).isKill());
+ 
++      if (needSpecialHandling) {
++        // TODO speccial handling, 10/25/2018
++        // Insert a store right after prior inserted copy instr
++        const TargetRegisterClass *rc = tri->getMinimalPhysRegClass(pair.reg);
++        int slotFI = mfi->CreateSpillStackObject(rc->getSize(), rc->getAlignment());
++        tii->storeRegToStackSlot(*insertedMBB, insertedPos, pair.reg, true, slotFI, rc, tri);
++
++        // insert load in the position right before the first instruction of otherMBB.
++        tii->loadRegFromStackSlot(*otherMBB, otherMBB->front(), pair.reg, slotFI, rc, tri);
++      }
++
+       // Note that, after replace the old register with new reg, which maybe
+       // raise other anti-dependence, such as:
+       // R0 = R2 + R1
