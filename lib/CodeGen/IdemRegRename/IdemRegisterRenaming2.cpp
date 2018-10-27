@@ -1412,6 +1412,11 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         auto from = li->getIndex(insertedPos) - 2;
         auto to = li->getIndex(pair.uses.back().mi);
 
+        if (from > to) {
+          // this situation could occurs by loop.
+          std::swap(from, to);
+        }
+
         interval.addRange(from, to);    // add an interval for a temporal move instr.
         phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), &interval, unallocableRegs);
 
