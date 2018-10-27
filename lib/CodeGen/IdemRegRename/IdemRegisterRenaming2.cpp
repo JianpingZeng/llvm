@@ -262,12 +262,18 @@ void IdemRegisterRenamer::useDefChainEnds(unsigned reg,
       if (tii->isIdemBoundary(mi))
         return;
 
+      std::vector<MachineOperand*> defs, uses;
+
       for (int i = mi->getNumOperands() - 1; i >= 0; i--) {
         auto mo = mi->getOperand(i);
         if (!mo.isReg() || !mo.getReg() || mo.getReg() != reg)
           continue;
+        if (mo.isDef()) defs.push_back(&mo);
+        else uses.push_back(&mo);
+      }
 
-        ends = !mo.isDef();
+      if (!defs.empty() || !uses.empty()) {
+        ends = !uses.empty();
         return;
       }
     }
@@ -1189,6 +1195,9 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       continue;
 
     auto &useMO = pair.uses.front();
+    if (useMO.mi->getParent()->getName() == "entry" && pair.reg == 63) {
+      useMO.mi->dump();
+    }
     mir->getRegionsContaining(*useMO.mi, &regions);
 
     // get the last insertion position of previous adjacent region
@@ -1265,6 +1274,11 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         itrvl.costToSpill = UINT32_MAX;
         std::vector<MIOp> temps;
         temps.assign(pair.defs.begin(), pair.defs.end());
+
+        if (from > to) {
+          // this situation could occurs by loop.
+          std::swap(from, to);
+        }
 
         itrvl.addRange(from, to);
         for (auto &op : temps) {
@@ -1477,6 +1491,13 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         liveIns.erase(oldReg);
         liveIns.insert(phyReg);
 
+        llvm::errs()<<"[";
+        for (auto r : liveIns)
+          llvm::errs()<<tri->getName(r)<<",";
+        llvm::errs()<<"]\n";
+
+        mf->dump();
+
         // for an iteration of each live-in register, renew the visited set.
         auto begin = ++MachineBasicBlock::iterator(r->getEntry());
         collectAntiDepsTrace(phyReg, begin, r->getEntry().getParent()->end(),
@@ -1502,7 +1523,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
 
       // request a new register
       if (phyReg == 0) {
-        assert(pair.uses.size() == 1);
 
         DenseSet<unsigned> unallocableRegs;
         for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++) {
