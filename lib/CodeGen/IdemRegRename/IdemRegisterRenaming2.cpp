@@ -283,6 +283,15 @@ void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
                                                MachineBasicBlock *mbb,
                                                std::vector<MIOp> uses,
                                                std::vector<MIOp> defs) {
+  // Check there is idem instr exists in current mbb.
+  bool idemExists = false;
+  for (auto &mi : *mbb) {
+    if (tii->isIdemBoundary(&mi)) {
+      idemExists = true;
+      break;
+    }
+  }
+
   for (auto itr = idem; itr != end; ++itr) {
     if (tii->isIdemBoundary(itr))
       return;
@@ -316,8 +325,8 @@ void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
   if (mbb && !mbb->succ_empty()) {
     for (auto succ = mbb->succ_begin(), succEnd = mbb->succ_end(); succ != succEnd; ++succ) {
       // Avoiding cycle walking over CFG.
-      // if (!dt->dominates(*succ, mbb))
-      collectAntiDepsTrace(reg, (*succ)->begin(), (*succ)->end(), *succ, uses, defs);
+      if (!dt->dominates(*succ, mbb) || idemExists)
+        collectAntiDepsTrace(reg, (*succ)->begin(), (*succ)->end(), *succ, uses, defs);
     }
   }
 }
