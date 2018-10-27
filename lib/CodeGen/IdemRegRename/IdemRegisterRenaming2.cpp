@@ -115,8 +115,8 @@ private:
   void gatherAntiDeps(MachineInstr *idem);
   bool handleAntiDependences();
   void collectAntiDepsTrace(unsigned,
-                            MachineBasicBlock::iterator,
-                            MachineBasicBlock::iterator,
+                            const MachineBasicBlock::iterator &,
+                            const MachineBasicBlock::iterator &,
                             MachineBasicBlock *,
                             std::vector<MIOp>,
                             std::vector<MIOp>);
@@ -203,8 +203,84 @@ private:
   bool willRaiseAntiDep(unsigned useReg,
                         MachineBasicBlock::iterator begin,
                         MachineBasicBlock::iterator end,
-                        MachineBasicBlock *mbb,
-                        std::set<MachineBasicBlock *> &visited);
+                        MachineBasicBlock *mbb/*,
+                        std::set<MachineBasicBlock *> &visited*/);
+
+  bool willRaiseAntiDepsInLoop(unsigned reg,
+                               const MachineBasicBlock::iterator &idem,
+                               const MachineBasicBlock::iterator &end,
+                               MachineBasicBlock *mbb) {
+    if (!mbb) return false;
+
+    std::set<MachineBasicBlock*> visited;
+    std::vector<MachineBasicBlock*> worklist;
+    worklist.push_back(mbb);
+    while (!worklist.empty()) {
+      auto cur = worklist.back();
+      worklist.pop_back();
+
+      if (!visited.insert(cur).second)
+        continue;
+
+      if (!cur->empty()) {
+        for (auto &mi : *cur) {
+          if (tii->isIdemBoundary(&mi))
+            return true;
+        }
+      }
+      for (auto succ = cur->succ_begin(), end = cur->succ_end(); succ != end; ++succ)
+        if (!visited.count(*succ))
+          worklist.push_back(*succ);
+    }
+
+    return false;
+  }
+
+  void computeAntiDepsInLoop(unsigned reg,
+                             const MachineBasicBlock::iterator &idem,
+                             const MachineBasicBlock::iterator &end,
+                             MachineBasicBlock *mbb,
+                             std::vector<MIOp> uses,
+                             std::vector<MIOp> defs) {
+    for (auto itr = idem; itr != end; ++itr) {
+      if (tii->isIdemBoundary(itr))
+        return;
+
+      // iterate over operands from right to left, which means cope with
+      // use oprs firstly, then def regs.
+      for (int i = itr->getNumOperands() - 1; i >= 0; i--) {
+        auto mo = itr->getOperand(i);
+        if (!mo.isReg() || !mo.getReg() || mo.getReg() != reg)
+          continue;
+
+        if (mo.isUse())
+          uses.emplace_back(itr, i);
+        else {
+          defs.emplace_back(itr, i);
+
+          ++itr;
+          bool ends = false;
+          std::set<MachineBasicBlock *> visited;
+          useDefChainEnds(reg, visited, itr, end, mbb, ends);
+          if (ends) {
+            // Construct anti-dependencies according uses and defs set.
+            antiDeps.emplace_back(reg, uses, defs);
+            return;
+          }
+          --itr;
+        }
+      }
+    }
+
+    if (!mbb->succ_empty()) {
+      for (auto succ = mbb->succ_begin(), succEnd = mbb->succ_end(); succ != succEnd; ++succ) {
+        // Avoiding cycle walking over CFG.
+        // If the next block is the loop header block and it have idem instr, we have to visit it.
+        if (!dt->dominates(*succ, mbb))
+          computeAntiDepsInLoop(reg, (*succ)->begin(), (*succ)->end(), *succ, uses, defs);
+      }
+    }
+  }
 
 private:
   const TargetInstrInfo *tii;
@@ -284,20 +360,11 @@ void IdemRegisterRenamer::useDefChainEnds(unsigned reg,
 }
 
 void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
-                                               MachineBasicBlock::iterator idem,
-                                               MachineBasicBlock::iterator end,
+                                               const MachineBasicBlock::iterator &idem,
+                                               const MachineBasicBlock::iterator &end,
                                                MachineBasicBlock *mbb,
                                                std::vector<MIOp> uses,
                                                std::vector<MIOp> defs) {
-  // Check there is idem instr exists in current mbb.
-  bool idemExists = false;
-  for (auto &mi : *mbb) {
-    if (tii->isIdemBoundary(&mi)) {
-      idemExists = true;
-      break;
-    }
-  }
-
   for (auto itr = idem; itr != end; ++itr) {
     if (tii->isIdemBoundary(itr))
       return;
@@ -310,17 +377,17 @@ void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
         continue;
 
       if (mo.isUse())
-        uses.push_back(MIOp(itr, i));
+        uses.emplace_back(itr, i);
       else {
-        defs.push_back(MIOp(itr, i));
+        defs.emplace_back(itr, i);
 
         ++itr;
         bool ends = false;
-        std::set<MachineBasicBlock*> visited;
+        std::set<MachineBasicBlock *> visited;
         useDefChainEnds(reg, visited, itr, end, mbb, ends);
         if (ends) {
-          // Construct anti-dependences according uses and defs set.
-          antiDeps.push_back(AntiDeps(reg, uses, defs));
+          // Construct anti-dependencies according uses and defs set.
+          antiDeps.emplace_back(reg, uses, defs);
           return;
         }
         --itr;
@@ -328,11 +395,14 @@ void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
     }
   }
 
-  if (mbb && !mbb->succ_empty()) {
+  if (!mbb->succ_empty()) {
     for (auto succ = mbb->succ_begin(), succEnd = mbb->succ_end(); succ != succEnd; ++succ) {
       // Avoiding cycle walking over CFG.
-      if (!dt->dominates(*succ, mbb) || idemExists)
+      // If the next block is the loop header block and it have idem instr, we have to visit it.
+      if (!dt->dominates(*succ, mbb))
         collectAntiDepsTrace(reg, (*succ)->begin(), (*succ)->end(), *succ, uses, defs);
+      else
+        computeAntiDepsInLoop(reg, (*succ)->begin(), (*succ)->end(), *succ, uses, defs);
     }
   }
 }
@@ -1158,15 +1228,15 @@ void IdemRegisterRenamer::updateLiveInOfPriorRegions(MachineBasicBlock::reverse_
 bool IdemRegisterRenamer::willRaiseAntiDep(unsigned useReg,
                                            MachineBasicBlock::iterator begin,
                                            MachineBasicBlock::iterator end,
-                                           MachineBasicBlock *mbb,
-                                           std::set<MachineBasicBlock *> &visited) {
-  if (!mbb || !visited.insert(mbb).second)
+                                           MachineBasicBlock *mbb/*,
+                                           std::set<MachineBasicBlock *> &visited*/) {
+  if (!mbb)
     return false;
 
   for (; begin != end; ++begin) {
     if (tii->isIdemBoundary(&*begin))
       return false;
-    for (int i = 0, e = begin->getNumOperands(); i < e; i++) {
+    for (unsigned i = 0, e = begin->getNumOperands(); i < e; i++) {
       auto mo = begin->getOperand(i);
       if (mo.isReg() && mo.isDef() && mo.getReg() == useReg)
         return true;
@@ -1175,8 +1245,14 @@ bool IdemRegisterRenamer::willRaiseAntiDep(unsigned useReg,
 
   for (auto itr = mbb->succ_begin(),succEnd = mbb->succ_end(); itr != succEnd; ++itr){
     auto succ = *itr;
-    bool res = willRaiseAntiDep(useReg, succ->begin(), succ->end(), succ, visited);
-    if (res) return true;
+    bool res;
+    if (!dt->dominates(succ, mbb))
+      res = willRaiseAntiDep(useReg, succ->begin(), succ->end(), succ/*, visited*/);
+    else
+      res = willRaiseAntiDepsInLoop(useReg, succ->begin(), succ->end(), succ);
+
+    if (res)
+      return true;
   }
   return false;
 }
@@ -1195,7 +1271,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       continue;
 
     auto &useMO = pair.uses.front();
-    /*if (useMO.mi->getParent()->getName() == "entry" && pair.reg == 63) {
+    /*if (useMO.mi->getParent()->getName() == "for.body" && pair.reg == 63) {
       useMO.mi->dump();
     }*/
     mir->getRegionsContaining(*useMO.mi, &regions);
@@ -1443,12 +1519,10 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         interval.addRange(from, to);    // add an interval for a temporal move instr.
         phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), &interval, unallocableRegs);
 
-        visited.clear();
         if (!phyReg)
           break;
 
-        if (!willRaiseAntiDep(phyReg, useMO.mi,
-            useMO.mi->getParent()->end(), useMO.mi->getParent(), visited))
+        if (!willRaiseAntiDep(phyReg, useMO.mi, useMO.mi->getParent()->end(), useMO.mi->getParent()))
           break;
 
         unallocableRegs.insert(phyReg);
@@ -1650,8 +1724,8 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   mfi = MF.getFrameInfo();
 
   // Collects anti-dependences operand pair.
-  llvm::errs() << "Before renaming2: \n";
-  MF.dump();
+  /*llvm::errs() << "Before renaming2: \n";
+  MF.dump();*/
 
   collectLiveInRegistersForRegions();
   computeReversePostOrder(MF, reversePostOrderMBBs);
