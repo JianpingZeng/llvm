@@ -316,8 +316,8 @@ void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
   if (mbb && !mbb->succ_empty()) {
     for (auto succ = mbb->succ_begin(), succEnd = mbb->succ_end(); succ != succEnd; ++succ) {
       // Avoiding cycle walking over CFG.
-      if (!dt->dominates(*succ, mbb))
-        collectAntiDepsTrace(reg, (*succ)->begin(), (*succ)->end(), *succ, uses, defs);
+      // if (!dt->dominates(*succ, mbb))
+      collectAntiDepsTrace(reg, (*succ)->begin(), (*succ)->end(), *succ, uses, defs);
     }
   }
 }
@@ -1021,10 +1021,10 @@ void IdemRegisterRenamer::collectUnallocableRegs(MachineBasicBlock::reverse_iter
   for (; begin != end; ++begin) {
     if (tii->isIdemBoundary(&*begin)) {
       auto liveIns = gather->getIdemLiveIns(&*begin);
-      llvm::errs()<<"Live in: [";
+      /*llvm::errs()<<"Live in: [";
       for (auto r : liveIns)
         llvm::errs()<<tri->getName(r)<<",";
-      llvm::errs()<<"]\n";
+      llvm::errs()<<"]\n";*/
 
       regs.insert(liveIns.begin(), liveIns.end());
       return;
@@ -1587,8 +1587,8 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   mfi = MF.getFrameInfo();
 
   // Collects anti-dependences operand pair.
-  llvm::errs() << "Before renaming2: \n";
-  MF.dump();
+  /*llvm::errs() << "Before renaming2: \n";
+  MF.dump();*/
 
   collectLiveInRegistersForRegions();
   computeReversePostOrder(MF, reversePostOrderMBBs);
@@ -1597,8 +1597,9 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
 
   bool changed = false;
   changed |= handleAntiDependences();
-  llvm::errs() << "After renaming2: \n";
-  MF.dump();
+
+  /*llvm::errs() << "After renaming2: \n";
+  MF.dump();*/
   clear();
   return changed;
 }

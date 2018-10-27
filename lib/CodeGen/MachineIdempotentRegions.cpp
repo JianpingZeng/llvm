@@ -249,6 +249,11 @@ bool MachineIdempotentRegions::verifyOperand(
     /*if (Indexes)
       errs() << "\t" << Indexes->getInstructionIndex(MO.getParent());*/
     errs() << "\t\t" << *MO.getParent();
+
+    llvm::errs()<<"LiveIns: [";
+    for (auto &r : LiveIns)
+      llvm::errs()<<PrintReg(r, TRI_)<<",";
+    llvm::errs()<<"]\n";
   }
   return Verified;
 }

@@ -1354,6 +1354,13 @@ static void dumpWrittenAndExposedVars(const MachineBasicBlock &MBB,
   dbgs() << "]\n";
 }
 
+static void printLiveIns(DenseSet<unsigned> &sets, const TargetRegisterInfo *tri) {
+  llvm::errs()<<"LiveIns: [";
+  for (auto &r : sets)
+    llvm::errs()<<PrintReg(r, tri)<<",";
+  llvm::errs()<<"]\n";
+}
+
 void MachineVerifier::verifyIdempotentRegions() {
   if (IdempotencePreservationMode == IdempotenceOptions::NoPreservation &&
      // Jianping Zeng
@@ -1431,6 +1438,9 @@ void MachineVerifier::verifyIdempotentRegions() {
         // Opportunistically verify now on the assumption that unnecessarily
         // doing so has negligible cost over later recomputing the exposed
         // variables for this instruction after we have converged.
+        MI->dump();
+        printLiveIns(OutgoingExposedVars, TRI);
+
         if (!MIR->verifyInstruction(*MI, OutgoingExposedVars, Indexes))
           report("Instruction clobbers idempotence variable", MI);
 
