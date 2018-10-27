@@ -1438,8 +1438,8 @@ void MachineVerifier::verifyIdempotentRegions() {
         // Opportunistically verify now on the assumption that unnecessarily
         // doing so has negligible cost over later recomputing the exposed
         // variables for this instruction after we have converged.
-        /*MI->dump();
-        printLiveIns(OutgoingExposedVars, TRI);*/
+        MI->dump();
+        printLiveIns(OutgoingExposedVars, TRI);
 
         if (!MIR->verifyInstruction(*MI, OutgoingExposedVars, Indexes))
           report("Instruction clobbers idempotence variable", MI);

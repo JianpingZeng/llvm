@@ -70,14 +70,14 @@ void LiveInsGather::run() {
 
   // Print out live-in registers set for each machine basic block.
   for (auto &mbb : mf) {
-    llvm::errs()<<mbb.getName()<<", ";
+    /*llvm::errs()<<mbb.getName()<<", ";
     printLiveRegisters(liveInMBBMap[&mbb]);
-    printLiveRegisters(liveOutMBBMap[&mbb], false);
+    printLiveRegisters(liveOutMBBMap[&mbb], false);*/
     for (auto &mi : mbb) {
       if (tii->isIdemBoundary(&mi)) {
         computeIdemLiveIns(&mi);
-        llvm::errs()<<"Idem, ";
-        printLiveRegisters(idemLiveInMap[&mi]);
+        /*llvm::errs()<<"Idem, ";
+        printLiveRegisters(idemLiveInMap[&mi]);*/
       }
     }
   }

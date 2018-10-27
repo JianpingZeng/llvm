@@ -369,7 +369,7 @@ void IdemRegisterRenamer::computeAntiDependenceSet() {
 bool IdemRegisterRenamer::isTwoAddressInstr(MachineInstr *useMI, unsigned reg) {
   // We should not rename the two-address instruction.
   auto mcID = useMI->getDesc();
-  int numOps = useMI->isInlineAsm() ? useMI->getNumOperands() : mcID.getNumOperands();
+  unsigned numOps = useMI->isInlineAsm() ? useMI->getNumOperands() : mcID.getNumOperands();
   for (unsigned i = 0; i < numOps; i++) {
     unsigned destIdx;
     if (!useMI->isRegTiedToDefOperand(i, &destIdx))
@@ -1195,9 +1195,9 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       continue;
 
     auto &useMO = pair.uses.front();
-    if (useMO.mi->getParent()->getName() == "entry" && pair.reg == 63) {
+    /*if (useMO.mi->getParent()->getName() == "entry" && pair.reg == 63) {
       useMO.mi->dump();
-    }
+    }*/
     mir->getRegionsContaining(*useMO.mi, &regions);
 
     // get the last insertion position of previous adjacent region
@@ -1491,12 +1491,12 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         liveIns.erase(oldReg);
         liveIns.insert(phyReg);
 
-        llvm::errs()<<"[";
+        /*llvm::errs()<<"[";
         for (auto r : liveIns)
           llvm::errs()<<tri->getName(r)<<",";
         llvm::errs()<<"]\n";
 
-        mf->dump();
+        mf->dump();*/
 
         // for an iteration of each live-in register, renew the visited set.
         auto begin = ++MachineBasicBlock::iterator(r->getEntry());
@@ -1523,6 +1523,35 @@ bool IdemRegisterRenamer::handleAntiDependences() {
 
       // request a new register
       if (phyReg == 0) {
+
+        // We have to check if it will cause anti-dependence after replacing
+        // the defined reg of two addr instr, for example:
+        //
+        // IDEM
+        // R0 = STr R1, R0
+        // ... = R0
+        // ...
+        // R0 = ...
+        //
+        // After replacing,
+        // IDEM
+        // R2 = R0
+        // R2 = STr R1, R2
+        // ... = R0
+        // ...
+        // R0 = ...
+        auto savedAntiDeps = antiDeps;
+        antiDeps.clear();
+        std::vector<MIOp> uses, defs;
+        collectAntiDepsTrace(pair.reg, ++MachineBasicBlock::iterator(useMI),
+                             mbb->end(), mbb, uses, defs);
+
+        bool causeAntiDep = !antiDeps.empty();
+        antiDeps = savedAntiDeps;
+        if (causeAntiDep) {
+          spillCurrentUse(pair);
+          goto UPDATE_INTERVAL;
+        }
 
         DenseSet<unsigned> unallocableRegs;
         for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++) {
@@ -1621,8 +1650,8 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   mfi = MF.getFrameInfo();
 
   // Collects anti-dependences operand pair.
-  /*llvm::errs() << "Before renaming2: \n";
-  MF.dump();*/
+  llvm::errs() << "Before renaming2: \n";
+  MF.dump();
 
   collectLiveInRegistersForRegions();
   computeReversePostOrder(MF, reversePostOrderMBBs);
