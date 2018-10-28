@@ -430,13 +430,14 @@ void IdemRegisterRenamer::gatherAntiDeps(MachineInstr *idem) {
     return;
 
   auto begin = ++MachineBasicBlock::iterator(idem);
-  /*if (idem->getParent()->getName() == "entry") {
-    llvm::errs()<<"LiveIns: [";
-    for (auto reg : liveIns)
-      llvm::errs()<<tri->getName(reg)<<", ";
-    llvm::errs()<<"]\n";
-  }*/
   for (auto reg : liveIns) {
+  /*   if (idem->getParent()->getName() == "if.end35"*//* && reg == 61*//*) {
+      llvm::errs()<<"LiveIns: [";
+      for (auto reg : liveIns)
+        llvm::errs()<<tri->getName(reg)<<", ";
+      llvm::errs()<<"]\n";
+    }*/
+
     std::set<MachineBasicBlock*> visited;
     // for an iteration of each live-in register, renew the visited set.
     collectAntiDepsTrace(reg, begin, idem->getParent()->end(),

@@ -54,30 +54,52 @@ void LiveInsGather::run() {
           set_union(out, liveInMBBMap[*succ]);
       }
 
+      /*if (mbb->getName() == "if.end35") {
+        llvm::errs()<<"Before: ";
+        printLiveRegisters(liveOutMBBMap[&*mbb], false);
+      }*/
+
       set_union(out, liveOutMBBMap[&*mbb]);
-      changed = !RegSetEq(out, liveOutMBBMap[&*mbb]);
-      if (changed)
+      bool localChanged = !RegSetEq(out, liveOutMBBMap[&*mbb]);
+      if (localChanged) {
+        changed = true;
         liveOutMBBMap[&*mbb] = out;
+      }
+
+      /*if (mbb->getName() == "if.end35") {
+        llvm::errs()<<"After: ";
+        printLiveRegisters(liveOutMBBMap[&*mbb], false);
+      }*/
 
       auto in = out;
       set_subtract(in, liveKills[&*mbb]);
       set_union(in, liveGens[&*mbb]);
-      changed = !RegSetEq(in, liveInMBBMap[&*mbb]);
-      if (changed)
+      localChanged = !RegSetEq(in, liveInMBBMap[&*mbb]);
+      if (localChanged) {
+        changed = true;
         liveInMBBMap[&*mbb] = in;
+      }
     }
   } while (changed);
 
   // Print out live-in registers set for each machine basic block.
   for (auto &mbb : mf) {
+    /*if (mbb.getName() == "if.end35") {
+      printLiveRegisters(liveOutMBBMap[&mbb], false);
+    }
+    if (mbb.getName() == "for.body")
+      printLiveRegisters(liveInMBBMap[&mbb], true);*/
+
     /*llvm::errs()<<mbb.getName()<<", ";
     printLiveRegisters(liveInMBBMap[&mbb]);
     printLiveRegisters(liveOutMBBMap[&mbb], false);*/
     for (auto &mi : mbb) {
       if (tii->isIdemBoundary(&mi)) {
         computeIdemLiveIns(&mi);
-        /*llvm::errs()<<"Idem, ";
-        printLiveRegisters(idemLiveInMap[&mi]);*/
+        /*if (mbb.getName() == "if.end35") {
+          llvm::errs()<<"Idem, ";
+          printLiveRegisters(idemLiveInMap[&mi]);
+        }*/
       }
     }
   }
