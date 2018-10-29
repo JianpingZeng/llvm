@@ -737,3 +737,312 @@ index da3e6a4..16a486d 100644
        // Note that, after replace the old register with new reg, which maybe
        // raise other anti-dependence, such as:
        // R0 = R2 + R1
+diff --git a/lib/CodeGen/IdemRegRename/IdemRegisterRenaming2.cpp b/lib/CodeGen/IdemRegRename/IdemRegisterRenaming2.cpp
+index 334c5ed..d32b32b 100644
+--- a/lib/CodeGen/IdemRegRename/IdemRegisterRenaming2.cpp
++++ b/lib/CodeGen/IdemRegRename/IdemRegisterRenaming2.cpp
+@@ -48,9 +48,23 @@ struct MIOp {
+ 
+   MIOp(MachineInstr *MI, unsigned Index) : mi(MI), index(Index) {}
+ 
++  MIOp(const MIOp &rhs) {
++    this->mi = MachineBasicBlock::iterator(*rhs.mi);
++    this->index = rhs.index;
++  }
++
++  MIOp& operator= (const MIOp &rhs) {
++    this->mi = MachineBasicBlock::iterator(*rhs.mi);
++    this->index = rhs.index;
++    return *this;
++  }
++
+   bool operator ==(MIOp &rhs) {
+     return &*mi == &*rhs.mi && index == rhs.index;
+   }
++  bool operator ==(const MIOp &rhs) const {
++    return &*mi == &*rhs.mi && index == rhs.index;
++  }
+ };
+ 
+ struct AntiDeps {
+@@ -64,6 +78,14 @@ struct AntiDeps {
+     uses.insert(uses.end(), Uses.begin(), Uses.end());
+     defs.insert(defs.end(), Defs.begin(), Defs.end());
+   }
++
++  bool operator==(const AntiDeps &rhs) const {
++    return reg == rhs.reg && uses == rhs.uses && defs == rhs.defs;
++  }
++
++  bool operator==(AntiDeps &rhs) {
++    return reg == rhs.reg && uses == rhs.uses && defs == rhs.defs;
++  }
+ };
+ 
+ class IdemRegisterRenamer : public MachineFunctionPass {
+@@ -200,6 +222,21 @@ private:
+                                   std::set<MachineBasicBlock*> &visited,
+                                   unsigned useReg,
+                                   bool &seenRedef);
++  bool partialEquals(unsigned reg1, unsigned reg2) {
++    assert(TargetRegisterInfo::isPhysicalRegister(reg1) &&
++        TargetRegisterInfo::isPhysicalRegister(reg2));
++
++    if (reg1 == reg2) return true;
++    for (const unsigned *r = tri->getSubRegisters(reg1); *r; ++r)
++      if (*r == reg2)
++        return true;
++
++    for (const unsigned *r = tri->getSubRegisters(reg2); *r; ++r)
++      if (*r == reg1)
++        return true;
++
++    return false;
++  }
+ 
+   bool willRaiseAntiDep(unsigned useReg,
+                         MachineBasicBlock::iterator begin,
+@@ -424,27 +461,147 @@ void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
+   }
+ }
+ 
++struct MIOpComparator {
++private:
++  LiveIntervalAnalysisIdem *li;
++public:
++  explicit MIOpComparator(LiveIntervalAnalysisIdem *LI) : li(LI) {}
++  bool operator() (const MIOp &lhs, const MIOp &rhs) {
++    unsigned lhsIndex = li->getIndex(lhs.mi), rhsIndex = li->getIndex(rhs.mi);
++    if (lhsIndex < rhsIndex)
++      return true;
++    else if (lhsIndex > rhsIndex)
++      return false;
++    return lhs.index < rhs.index;
++  }
++};
++
++/**
++ * Add such elements of rhs don't exist in res into the res.
++ * @param res
++ * @param rhs
++ */
++static void add(std::vector<MIOp> &res, std::vector<MIOp> &rhs) {
++  for (auto &op : rhs) {
++    if (std::find(res.begin(), res.end(), op) == res.end()) {
++      res.emplace_back(MachineBasicBlock::iterator(*op.mi), op.index);
++    }
++  }
++}
++
+ void IdemRegisterRenamer::gatherAntiDeps(MachineInstr *idem) {
+   auto liveIns = gather->getIdemLiveIns(idem);
+   if (liveIns.empty())
+     return;
+ 
+   auto begin = ++MachineBasicBlock::iterator(idem);
++  std::set<MachineBasicBlock*> visited;
+   for (auto reg : liveIns) {
+-  /*   if (idem->getParent()->getName() == "if.end35"*//* && reg == 61*//*) {
++     /*if (idem->getParent()->getName() == "if.end35" && reg == 61) {
+       llvm::errs()<<"LiveIns: [";
+       for (auto reg : liveIns)
+         llvm::errs()<<tri->getName(reg)<<", ";
+       llvm::errs()<<"]\n";
+     }*/
+-
+-    std::set<MachineBasicBlock*> visited;
++     /*auto saved = antiDeps;
++     antiDeps.clear();*/
++     visited.clear();
+     // for an iteration of each live-in register, renew the visited set.
+     collectAntiDepsTrace(reg, begin, idem->getParent()->end(),
+                          idem->getParent(),
+                          std::vector<MIOp>(),
+                          std::vector<MIOp>(),
+                          visited);
++
++    // We need to handle such case that there are many anti-dependencies
++    // pair in the same region in terms of same register along with
++    // different execution paths, for example:
++    //         IDEM
++    //       /     \
++    //      v       v
++    // ...=R0       ...=R0
++    //     \        /
++    //      v      v
++    //    R0 = R0 + 1
++    /*typedef std::vector<size_t> ADIterator;
++    typedef std::vector<ADIterator> JointedADList;
++    JointedADList adList;
++    if (antiDeps.size() > 1) {
++      ADIterator sameLeadingADs;
++      for (size_t i = 0, e = antiDeps.size(); i < e; i++) {
++        sameLeadingADs.clear();
++        for (size_t j = i + 1; j < e; j++) {
++          if (antiDeps[i] == antiDeps[j]) {
++            if (sameLeadingADs.empty())
++              sameLeadingADs.push_back(i);
++            sameLeadingADs.push_back(j);
++          }
++        }
++
++        if (!sameLeadingADs.empty())
++          adList.push_back(sameLeadingADs);
++      }
++
++      // MIOpComparator comparator(li);
++      // std::set<MIOp, MIOpComparator> uses(comparator), defs(comparator);
++      std::vector<AntiDeps> ads;
++
++      for (auto &list : adList) {
++        std::vector<MIOp> uses, defs;
++
++        size_t i = 0, e = list.size();
++        *//*add(uses, antiDeps[list[0]].uses);
++        add(defs, antiDeps[list[0]].defs);*//*
++
++        for (; i < e; i++) {
++          add(uses, antiDeps[list[i]].uses);
++          add(defs, antiDeps[list[i]].defs);
++        }
++
++        ads.emplace_back(reg, uses, defs);
++
++        *//*antiDeps[list[0]].uses = uses;
++        antiDeps[list[0]].defs = defs;*//*
++        *//*(*ad)->uses.clear();
++        (*ad)->defs.clear();
++        (*ad)->uses.insert((*ad)->uses.begin(), uses.begin(), uses.end());
++        (*ad)->defs.insert((*ad)->defs.begin(), defs.begin(), defs.end());*//*
++      }
++
++      for (auto &list : adList) {
++        for (size_t i : list)
++          if (i < antiDeps.size())
++            antiDeps.erase(antiDeps.begin() + i);
++      }
++
++      // Reach here, if we still have anti-dependencies in antiDeps list, we have to spill out it.
++      // FIXME, We should take an high optimized method instead of simplicity spilling it out in the future.
++      if (antiDeps.size() > 1) {
++        std::vector<MIOp> uses, defs;
++
++        for (auto &ad : antiDeps) {
++          add(uses, ad.uses);
++          add(defs, ad.defs);
++          *//*uses.insert(ad.uses.begin(), ad.uses.end());
++          defs.insert(ad.defs.begin(), ad.defs.end());*//*
++        }
++
++        auto &ad = antiDeps.front();
++        ad.uses = uses;
++        ad.defs = defs;
++        *//*ad.uses.clear();
++        ad.defs.clear();
++        ad.uses.insert(ad.uses.end(), uses.begin(), uses.end());
++        ad.defs.insert(ad.defs.end(), defs.begin(), defs.end());*//*
++        spillCurrentUse(ad);
++        antiDeps.clear();
++      }
++
++      antiDeps = saved;
++    }
++    else
++      antiDeps.insert(antiDeps.begin(), saved.begin(), saved.end());
++      */
+   }
+ }
+ 
+@@ -1258,7 +1415,7 @@ bool IdemRegisterRenamer::willRaiseAntiDep(unsigned useReg,
+       return false;
+     for (unsigned i = 0, e = begin->getNumOperands(); i < e; i++) {
+       auto mo = begin->getOperand(i);
+-      if (mo.isReg() && mo.isDef() && mo.getReg() == useReg)
++      if (mo.isReg() && mo.isDef() && partialEquals(mo.getReg(), useReg))
+         return true;
+     }
+   }
+@@ -1472,8 +1629,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
+       MachineInstr *insertedPos = nullptr;
+       unsigned minIndex = UINT32_MAX;
+       insertedPos = nullptr;
+-      auto &useMO = pair.uses.front();
+-      unsigned phyReg = 0;
+       DenseSet<unsigned> unallocableRegs;
+ 
+       for (auto r : regions) {
+@@ -1756,6 +1911,19 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
+ 
+   computeAntiDependenceSet();
+ 
++  /*for (unsigned i = 10; i < antiDeps.size(); i++)
++  {
++    llvm::errs()<<"Uses: \n";
++    for (auto &op : antiDeps[i].uses)
++      op.mi->dump();
++    llvm::errs()<<"\n";
++
++    llvm::errs()<<"Defs: \n";
++    for (auto &op : antiDeps[i].defs)
++      op.mi->dump();
++    llvm::errs()<<"\n";
++  }
++  exit(0);*/
+   bool changed = false;
+   changed |= handleAntiDependences();
+ 
+diff --git a/lib/CodeGen/IdemRegRename/IdempotentRegionLiveInsGather.cpp b/lib/CodeGen/IdemRegRename/IdempotentRegionLiveInsGather.cpp
+index d52377e..fee0958 100644
+--- a/lib/CodeGen/IdemRegRename/IdempotentRegionLiveInsGather.cpp
++++ b/lib/CodeGen/IdemRegRename/IdempotentRegionLiveInsGather.cpp
+@@ -20,9 +20,9 @@ void LiveInsGather::run() {
+             tri->isNotCountedAsLiveness(mo.getReg())) continue;
+         unsigned reg = mo.getReg();
+         if (mo.isUse() && !liveKills[&mbb].count(reg))
+-          liveGens[&mbb].insert(reg);
++          addRegisterWithSubregs(liveGens[&mbb], reg);
+         else
+-          liveKills[&mbb].insert(reg);
++          addRegisterWithSubregs(liveKills[&mbb], reg);
+       }
+     }
+   }
+@@ -122,9 +122,9 @@ void LiveInsGather::computeIdemLiveIns(const MachineInstr *mi) {
+         continue;
+ 
+       if (mo.isDef())
+-        liveOuts.erase(mo.getReg());
++        removeRegisterAndSubregs(liveOuts, mo.getReg());
+       else
+-        liveOuts.insert(mo.getReg());
++        addRegisterWithSubregs(liveOuts, mo.getReg());
+     }
+   }
+ 
+diff --git a/lib/CodeGen/IdemRegRename/IdempotentRegionLiveInsGather.h b/lib/CodeGen/IdemRegRename/IdempotentRegionLiveInsGather.h
+index ac0a864..e551f38 100644
+--- a/lib/CodeGen/IdemRegRename/IdempotentRegionLiveInsGather.h
++++ b/lib/CodeGen/IdemRegRename/IdempotentRegionLiveInsGather.h
+@@ -46,6 +46,22 @@ public:
+ private:
+   void computeIdemLiveIns(const MachineInstr *mi);
+   void printLiveRegisters(RegSet &regs, bool liveInOrLiveOut = true);
++  void addRegisterWithSubregs(RegSet &set, unsigned reg) {
++    set.insert(reg);
++    if (!TargetRegisterInfo::isStackSlot(reg) &&
++        TargetRegisterInfo::isPhysicalRegister(reg)) {
++      for (const unsigned *r = tri->getSubRegisters(reg); *r; ++r)
++        set.insert(*r);
++    }
++  }
++  void removeRegisterAndSubregs(RegSet &set, unsigned reg) {
++    set.erase(reg);
++    if (!TargetRegisterInfo::isStackSlot(reg) &&
++        TargetRegisterInfo::isPhysicalRegister(reg)) {
++      for (const unsigned *r = tri->getSubRegisters(reg); *r; ++r)
++        set.erase(*r);
++    }
++  }
+ };
+ }
+ 

@@ -201,6 +201,23 @@ private:
                                   unsigned useReg,
                                   bool &seenRedef);
 
+  bool partialEquals(unsigned reg1, unsigned reg2) {
+    assert(TargetRegisterInfo::isPhysicalRegister(reg1) &&
+        TargetRegisterInfo::isPhysicalRegister(reg2));
+
+    if (reg1 == reg2)
+      return true;
+    for (const unsigned *r = tri->getSubRegisters(reg1); *r; ++r)
+      if (*r == reg2)
+        return true;
+
+    for (const unsigned *r = tri->getSubRegisters(reg2); *r; ++r)
+      if (*r == reg1)
+        return true;
+
+    return false;
+  }
+
   bool willRaiseAntiDep(unsigned useReg,
                         MachineBasicBlock::iterator begin,
                         MachineBasicBlock::iterator end,
@@ -1258,7 +1275,7 @@ bool IdemRegisterRenamer::willRaiseAntiDep(unsigned useReg,
       return false;
     for (unsigned i = 0, e = begin->getNumOperands(); i < e; i++) {
       auto mo = begin->getOperand(i);
-      if (mo.isReg() && mo.isDef() && mo.getReg() == useReg)
+      if (mo.isReg() && mo.isDef() && partialEquals(mo.getReg(), useReg))
         return true;
     }
   }
@@ -1291,7 +1308,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       continue;
 
     auto &useMO = pair.uses.front();
-    /*if (useMO.mi->getParent()->getName() == "for.body" && pair.reg == 63) {
+    /*if (useMO.mi->getParent()->getName() == "for.end32" && pair.reg == 57) {
       useMO.mi->dump();
     }*/
     mir->getRegionsContaining(*useMO.mi, &regions);
@@ -1472,8 +1489,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       MachineInstr *insertedPos = nullptr;
       unsigned minIndex = UINT32_MAX;
       insertedPos = nullptr;
-      auto &useMO = pair.uses.front();
-      unsigned phyReg = 0;
       DenseSet<unsigned> unallocableRegs;
 
       for (auto r : regions) {
@@ -1685,18 +1700,23 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         // li->intervals.insert(std::make_pair(phyReg, interval));
         assert(TargetRegisterInfo::isPhysicalRegister(phyReg));
         assert(phyReg != oldReg);
+
+        // We must insert move firstly, and than substitute the old reg with new reg.
+        tii->copyPhysReg(*mbb, useMI, DebugLoc(), phyReg,  oldReg, useMI->getOperand(moIndex).isKill());
+
+        for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++) {
+          MachineOperand& mo = useMI->getOperand(i);
+          if (mo.isReg() && mo.getReg() == oldReg)
+            mo.setReg(phyReg);
+        }
       }
+      else {
 
-      // Step#8: substitute the old reg with phyReg,
-      // and remove other anti-dep on this use.
+        // Step#8: substitute the old reg with phyReg,
+        // and remove other anti-dep on this use.
 
-      // We must insert move firstly, and than substitute the old reg with new reg.
-      tii->copyPhysReg(*mbb, useMI, DebugLoc(), phyReg, oldReg, useMI->getOperand(moIndex).isKill());
-
-      for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++) {
-        MachineOperand& mo = useMI->getOperand(i);
-        if (mo.isReg() && mo.getReg() == oldReg)
-          mo.setReg(phyReg);
+        // We must insert move firstly, and than substitute the old reg with new reg.
+        tii->copyPhysReg(*mbb, useMI, DebugLoc(), oldReg, phyReg, true);
       }
     }
 

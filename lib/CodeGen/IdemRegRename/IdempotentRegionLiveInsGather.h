@@ -46,6 +46,22 @@ public:
 private:
   void computeIdemLiveIns(const MachineInstr *mi);
   void printLiveRegisters(RegSet &regs, bool liveInOrLiveOut = true);
+  void addRegisterWithSubregs(RegSet &set, unsigned reg) {
+    set.insert(reg);
+    if (!TargetRegisterInfo::isStackSlot(reg) &&
+        TargetRegisterInfo::isPhysicalRegister(reg)) {
+      for (const unsigned *r = tri->getSubRegisters(reg); *r; ++r)
+        set.insert(*r);
+    }
+  }
+  void removeRegisterAndSubregs(RegSet &set, unsigned reg) {
+    set.erase(reg);
+    if (!TargetRegisterInfo::isStackSlot(reg) &&
+        TargetRegisterInfo::isPhysicalRegister(reg)) {
+      for (const unsigned *r = tri->getSubRegisters(reg); *r; ++r)
+        set.erase(*r);
+    }
+  }
 };
 }
 

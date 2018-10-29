@@ -20,9 +20,9 @@ void LiveInsGather::run() {
             tri->isNotCountedAsLiveness(mo.getReg())) continue;
         unsigned reg = mo.getReg();
         if (mo.isUse() && !liveKills[&mbb].count(reg))
-          liveGens[&mbb].insert(reg);
+          addRegisterWithSubregs(liveGens[&mbb], reg);
         else
-          liveKills[&mbb].insert(reg);
+          addRegisterWithSubregs(liveKills[&mbb], reg);
       }
     }
   }
@@ -122,9 +122,9 @@ void LiveInsGather::computeIdemLiveIns(const MachineInstr *mi) {
         continue;
 
       if (mo.isDef())
-        liveOuts.erase(mo.getReg());
+        removeRegisterAndSubregs(liveOuts, mo.getReg());
       else
-        liveOuts.insert(mo.getReg());
+        addRegisterWithSubregs(liveOuts, mo.getReg());
     }
   }
 
