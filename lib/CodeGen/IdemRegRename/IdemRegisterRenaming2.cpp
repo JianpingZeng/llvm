@@ -181,7 +181,7 @@ private:
                               MachineBasicBlock::reverse_iterator end,
                               MachineBasicBlock *mbb,
                               std::set<MachineBasicBlock*> &visited,
-                              DenseSet<unsigned> &regs);
+                              DenseSet<unsigned> &unallocableRegs);
 
   unsigned getNumFreeRegs(unsigned reg, DenseSet<unsigned> &unallocableRegs);
 
@@ -297,6 +297,15 @@ private:
         if (!dt->dominates(*succ, mbb))
           computeAntiDepsInLoop(reg, (*succ)->begin(), (*succ)->end(), *succ, uses, defs);
       }
+    }
+  }
+
+  void addRegisterWithSubregs(DenseSet<unsigned> &set, unsigned reg) {
+    set.insert(reg);
+    if (!TargetRegisterInfo::isStackSlot(reg) &&
+        TargetRegisterInfo::isPhysicalRegister(reg)) {
+      for (const unsigned *r = tri->getSubRegisters(reg); *r; ++r)
+        set.insert(*r);
     }
   }
 
@@ -1136,7 +1145,7 @@ void IdemRegisterRenamer::collectUnallocableRegs(MachineBasicBlock::reverse_iter
                                                  MachineBasicBlock::reverse_iterator end,
                                                  MachineBasicBlock *mbb,
                                                  std::set<MachineBasicBlock*> &visited,
-                                                 DenseSet<unsigned> &regs) {
+                                                 DenseSet<unsigned> &unallocableRegs) {
   if (!mbb || !visited.insert(mbb).second)
     return;
 
@@ -1148,13 +1157,15 @@ void IdemRegisterRenamer::collectUnallocableRegs(MachineBasicBlock::reverse_iter
         llvm::errs()<<tri->getName(r)<<",";
       llvm::errs()<<"]\n";*/
 
-      regs.insert(liveIns.begin(), liveIns.end());
+      std::for_each(liveIns.begin(), liveIns.end(), [&](unsigned reg){
+        addRegisterWithSubregs(unallocableRegs, reg);
+      });
       return;
     }
   }
 
   std::for_each(mbb->pred_begin(), mbb->pred_end(), [&](MachineBasicBlock *pred){
-    collectUnallocableRegs(pred->rbegin(), pred->rend(), pred, visited, regs);
+    collectUnallocableRegs(pred->rbegin(), pred->rend(), pred, visited, unallocableRegs);
   });
 }
 
@@ -1300,12 +1311,16 @@ bool IdemRegisterRenamer::handleAntiDependences() {
 
   std::vector<IdempotentRegion *> regions;
 
+  /*int k = 0;*/
   while (!antiDeps.empty()) {
     auto pair = antiDeps.front();
     antiDeps.erase(antiDeps.begin());
 
     if (pair.uses.empty() || pair.defs.empty())
       continue;
+
+    /*llvm::errs()<<k++<<"\n";
+    mf->dump();*/
 
     auto &useMO = pair.uses.front();
     /*if (useMO.mi->getParent()->getName() == "for.end32" && pair.reg == 57) {
@@ -1406,22 +1421,31 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         }
 
         DenseSet<unsigned> unallocableRegs;
-        unallocableRegs.insert(pair.reg);
+        addRegisterWithSubregs(unallocableRegs, pair.reg);
         for (auto &r : regions) {
-          set_union(unallocableRegs, gather->getIdemLiveIns(&r->getEntry()));
+          auto liveins = gather->getIdemLiveIns(&r->getEntry());
+          std::for_each(liveins.begin(), liveins.end(), [&](unsigned reg) {
+            addRegisterWithSubregs(unallocableRegs, reg);
+          });
         }
 
         for (MIOp &op : usesAndDef) {
           auto mbb = op.mi->getParent();
-          unallocableRegs.insert(mbb->livein_begin(), mbb->livein_end());
+          std::for_each(mbb->livein_begin(), mbb->livein_end(), [&](unsigned reg){
+            addRegisterWithSubregs(unallocableRegs, reg);
+          });
         }
 
         for (MIOp &op : pair.defs) {
           auto mbb = op.mi->getParent();
-          unallocableRegs.insert(mbb->livein_begin(), mbb->livein_end());
+          std::for_each(mbb->livein_begin(), mbb->livein_end(), [&](unsigned reg){
+            addRegisterWithSubregs(unallocableRegs, reg);
+          });
 
-          std::for_each(mbb->pred_begin(), mbb->pred_end(), [&](MachineBasicBlock *succ){
-            unallocableRegs.insert(succ->livein_begin(), succ->livein_end());
+          std::for_each(mbb->pred_begin(), mbb->pred_end(), [&](MachineBasicBlock *pred){
+            std::for_each(pred->livein_begin(), pred->livein_end(), [&](unsigned reg){
+              addRegisterWithSubregs(unallocableRegs, reg);
+            });
           });
         }
 
@@ -1493,7 +1517,11 @@ bool IdemRegisterRenamer::handleAntiDependences() {
 
       for (auto r : regions) {
         MachineInstr &idem = r->getEntry();
-        set_union(unallocableRegs, gather->getIdemLiveIns(&idem));
+        auto liveins = gather->getIdemLiveIns(&idem);
+        std::for_each(liveins.begin(), liveins.end(), [&](unsigned reg) {
+          addRegisterWithSubregs(unallocableRegs, reg);
+        });
+
         auto begin = MachineBasicBlock::reverse_iterator(idem);
         visited.clear();
         collectUnallocableRegs(begin, idem.getParent()->rend(),
@@ -1507,13 +1535,13 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       }
 
       // can not assign the old register to use mi
-      unallocableRegs.insert(pair.reg);
+      addRegisterWithSubregs(unallocableRegs, pair.reg);
       std::for_each(pair.uses.begin(), pair.uses.end(), [&](MIOp &op) {
         MachineInstr *useMI = op.mi;
         for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++)
           if (useMI->getOperand(i).isReg() && useMI->getOperand(i).getReg() &&
               useMI->getOperand(i).isDef())
-            unallocableRegs.insert(useMI->getOperand(i).getReg());
+            addRegisterWithSubregs(unallocableRegs, useMI->getOperand(i).getReg());
       });
 
       /**
@@ -1562,7 +1590,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         if (!willRaiseAntiDep(phyReg, useMO.mi, useMO.mi->getParent()->end(), useMO.mi->getParent()))
           break;
 
-        unallocableRegs.insert(phyReg);
+        addRegisterWithSubregs(unallocableRegs, phyReg);
       }while (true);
 
       if (!phyReg) {
@@ -1667,16 +1695,18 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         }
 
         DenseSet<unsigned> unallocableRegs;
-        for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++) {
-          auto mo = useMI->getOperand(i);
-          if (mo.isReg() && !mo.getReg())
-            unallocableRegs.insert(mo.getReg());
+        for (unsigned j = 0, e = useMI->getNumOperands(); j < e; j++) {
+          auto mo = useMI->getOperand(j);
+          if (mo.isReg() && mo.getReg())
+            addRegisterWithSubregs(unallocableRegs, mo.getReg());
         }
         unallocableRegs.insert(oldReg);
 
         for (auto & r : regions) {
           auto liveins = gather->getIdemLiveIns(&r->getEntry());
-          unallocableRegs.insert(liveins.begin(), liveins.end());
+          std::for_each(liveins.begin(), liveins.end(), [&](unsigned reg) {
+            addRegisterWithSubregs(unallocableRegs, reg);
+          });
         }
 
         LiveIntervalIdem interval;
