@@ -48,9 +48,15 @@ struct MIOp {
 
   MIOp(MachineInstr *MI, unsigned Index) : mi(MI), index(Index) {}
 
-  bool operator ==(MIOp &rhs) {
+  bool operator==(MIOp &rhs) {
     return &*mi == &*rhs.mi && index == rhs.index;
   }
+
+  bool operator==(const MIOp &rhs) const {
+    return &*mi == &*rhs.mi && index == rhs.index;
+  }
+
+  MIOp &operator=(const MIOp &rhs) = default;
 };
 
 struct AntiDeps {
@@ -58,11 +64,21 @@ struct AntiDeps {
   std::vector<MIOp> uses;
   std::vector<MIOp> defs;
 
+  AntiDeps() = default;
+
   AntiDeps(unsigned Reg, std::vector<MIOp> &Uses,
            std::vector<MIOp> &Defs)
       : reg(Reg), uses(), defs() {
     uses.insert(uses.end(), Uses.begin(), Uses.end());
     defs.insert(defs.end(), Defs.begin(), Defs.end());
+  }
+
+  bool operator==(const AntiDeps &rhs) const {
+    return reg == rhs.reg && uses == rhs.uses && defs == rhs.defs;
+  }
+
+  bool operator==(AntiDeps &rhs) {
+    return reg == rhs.reg && uses == rhs.uses && defs == rhs.defs;
   }
 };
 
@@ -79,6 +95,7 @@ public:
     mf = nullptr;
     mri = nullptr;
     mfi = nullptr;
+    dt = nullptr;
   }
 
   bool runOnMachineFunction(MachineFunction &MF) override;
@@ -105,7 +122,6 @@ public:
     mf = nullptr;
     mri = nullptr;
     mfi = nullptr;
-    reversePostOrderMBBs.clear();
     antiDeps.clear();
   }
 
@@ -113,7 +129,7 @@ private:
   inline void collectLiveInRegistersForRegions();
   void computeAntiDependenceSet();
   void gatherAntiDeps(MachineInstr *idem);
-  bool handleAntiDependences();
+  bool handleAntiDependences(bool &needRecompute);
   void collectAntiDepsTrace(unsigned,
                             const MachineBasicBlock::iterator &,
                             const MachineBasicBlock::iterator &,
@@ -313,7 +329,6 @@ private:
   const TargetInstrInfo *tii;
   const TargetRegisterInfo *tri;
   MachineIdempotentRegions *mir;
-  std::vector<MachineBasicBlock *> reversePostOrderMBBs;
   std::vector<AntiDeps> antiDeps;
   LiveInsGather *gather;
   LiveIntervalAnalysisIdem *li;
@@ -457,7 +472,7 @@ void IdemRegisterRenamer::gatherAntiDeps(MachineInstr *idem) {
 
   auto begin = ++MachineBasicBlock::iterator(idem);
   for (auto reg : liveIns) {
-  /*   if (idem->getParent()->getName() == "if.end35"*//* && reg == 61*//*) {
+  /*if (idem->getParent()->getName() == "if.end35"*//* && reg == 61*//*) {
       llvm::errs()<<"LiveIns: [";
       for (auto reg : liveIns)
         llvm::errs()<<tri->getName(reg)<<", ";
@@ -1305,7 +1320,9 @@ bool IdemRegisterRenamer::willRaiseAntiDep(unsigned useReg,
   return false;
 }
 
-bool IdemRegisterRenamer::handleAntiDependences() {
+bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
+  needRecompute = false;
+
   if (antiDeps.empty())
     return false;
 
@@ -1762,13 +1779,30 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       }
     }*/
 
+    for (auto itr = antiDeps.begin(), end = antiDeps.end(); itr != end; ++itr) {
+      if (itr->reg == pair.reg) {
+        for (auto &op : itr->uses)
+          if (std::find(pair.uses.begin(), pair.uses.end(), op) != pair.uses.end()) {
+            antiDeps.erase(itr);
+            needRecompute = true;
+          }
+        for (auto &op : itr->defs)
+          if (std::find(pair.defs.begin(), pair.defs.end(), op) != pair.defs.end()) {
+            antiDeps.erase(itr);
+            needRecompute = true;
+          }
+      }
+    }
+
   UPDATE_INTERVAL:
+    {
     // FIXME, use an lightweight method to update LiveIntervalAnalysisIdem
     li->releaseMemory();
     li->runOnMachineFunction(*mf);
     /*delete gather;
     gather = new LiveInsGather(*mf);
     gather->run();*/
+    }
   }
 
   return true;
@@ -1801,13 +1835,16 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   /*llvm::errs() << "Before renaming2: \n";
   MF.dump();*/
 
-  collectLiveInRegistersForRegions();
-  computeReversePostOrder(MF, reversePostOrderMBBs);
-
-  computeAntiDependenceSet();
-
   bool changed = false;
-  changed |= handleAntiDependences();
+  bool needRecompute;
+
+  do {
+    collectLiveInRegistersForRegions();
+    computeAntiDependenceSet();
+    changed |= handleAntiDependences(needRecompute);
+    if (!needRecompute)
+      break;
+  }while (true);
 
   /*llvm::errs() << "After renaming2: \n";
   MF.dump();*/
