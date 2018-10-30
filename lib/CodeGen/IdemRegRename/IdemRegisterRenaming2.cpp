@@ -1779,32 +1779,41 @@ bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
       }
     }*/
 
-    for (auto itr = antiDeps.begin(), end = antiDeps.end(); itr != end; ++itr) {
-      if (itr->reg == pair.reg) {
-        for (auto &op : itr->uses)
-          if (std::find(pair.uses.begin(), pair.uses.end(), op) != pair.uses.end()) {
-            antiDeps.erase(itr);
-            needRecompute = true;
-          }
-        for (auto &op : itr->defs)
-          if (std::find(pair.defs.begin(), pair.defs.end(), op) != pair.defs.end()) {
-            antiDeps.erase(itr);
-            needRecompute = true;
-          }
-      }
-    }
-
-  UPDATE_INTERVAL:
     {
-    // FIXME, use an lightweight method to update LiveIntervalAnalysisIdem
-    li->releaseMemory();
-    li->runOnMachineFunction(*mf);
-    /*delete gather;
-    gather = new LiveInsGather(*mf);
-    gather->run();*/
+      std::vector<std::vector<AntiDeps>::iterator> toRemoved;
+      for (auto itr = antiDeps.begin(), end = antiDeps.end(); itr != end; ++itr) {
+        if (itr->reg == pair.reg) {
+          bool found = false;
+          for (auto &op : itr->uses) {
+            if (std::find(pair.uses.begin(), pair.uses.end(), op) != pair.uses.end()) {
+              toRemoved.push_back(itr);
+              needRecompute = true;
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            for (auto &op : itr->defs)
+              if (std::find(pair.defs.begin(), pair.defs.end(), op) != pair.defs.end()) {
+                toRemoved.push_back(itr);
+                needRecompute = true;
+                break;
+              }
+          }
+        }
+      }
+      for (auto &itr : toRemoved)
+        antiDeps.erase(itr);
     }
-  }
 
+UPDATE_INTERVAL:
+  // FIXME, use an lightweight method to update LiveIntervalAnalysisIdem
+  li->releaseMemory();
+  li->runOnMachineFunction(*mf);
+  /*delete gather;
+  gather = new LiveInsGather(*mf);
+  gather->run();*/
+  }
   return true;
 }
 
