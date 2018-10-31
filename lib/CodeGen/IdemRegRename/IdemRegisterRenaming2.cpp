@@ -57,6 +57,14 @@ struct MIOp {
   }
 
   MIOp &operator=(const MIOp &rhs) = default;
+
+  bool operator !=(MIOp &rhs) {
+    return !(*this == rhs);
+  }
+
+  bool operator !=(const MIOp &rhs) const {
+    return !(*this == rhs);
+  }
 };
 
 struct AntiDeps {
@@ -1328,7 +1336,7 @@ bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
 
   std::vector<IdempotentRegion *> regions;
 
-  /*int k = 0;*/
+  /*int cnt = 0;*/
   while (!antiDeps.empty()) {
     auto pair = antiDeps.front();
     antiDeps.erase(antiDeps.begin());
@@ -1336,7 +1344,7 @@ bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
     if (pair.uses.empty() || pair.defs.empty())
       continue;
 
-    /*llvm::errs()<<k++<<"\n";
+    /*llvm::errs()<<cnt++<<"\n";
     mf->dump();*/
 
     auto &useMO = pair.uses.front();
@@ -1358,7 +1366,20 @@ bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
     // as the current region.
     std::vector<MIOp> usesAndDef;
     bool canReplace = false;
-    auto &miLastDef = pair.defs.back();
+    // We don't need to cope with those def registers have replaced in the previous round
+    size_t i;
+    for (i = pair.defs.size(); i > 0; --i) {
+      auto &op = pair.defs[i-1];
+      if (op.mi->getOperand(op.index).getReg() != pair.reg)
+        continue;
+      else
+        break;
+    }
+    if (i == 0)
+      continue;
+
+    MIOp &miLastDef = pair.defs[i-1];
+
     getUsesSetOfDef(&miLastDef.mi->getOperand(miLastDef.index), usesAndDef, canReplace);
 
     auto saved = miLastDef.mi;
@@ -1498,7 +1519,7 @@ bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
         // The anti-dependence on R0 also remains.
         unsigned oldReg = pair.reg;
         for (auto &r : regions) {
-          std::set<MachineBasicBlock*> visited;
+          visited.clear();
           auto begin = ++MachineBasicBlock::iterator(r->getEntry());
           collectAntiDepsTrace(oldReg, begin, r->getEntry().getParent()->end(),
                                r->getEntry().getParent(),
@@ -1513,7 +1534,63 @@ bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
     // get the free register
     unsigned phyReg = 0;
 
-    if (!twoAddrInstExits || pair.uses.size() > 1) {
+    /**
+     * -------   -------
+     * ...=R0    ...=R0
+     *   \      /
+     *    \    /
+     *     v v
+     *    ...=R0
+     *     ...
+     *    R0=...
+     *
+     * Transformed into:
+     *
+     * R2 = R0
+     * -------   -------
+     * ...=R2    ...=R0
+     *   \       R2 = R0  (extra move instruction to preserve the program semantics)
+     *   \      /
+     *    \    /
+     *     v v
+     *    ...=R2
+     *     ...
+     *    R0=...
+     */
+    MIOp *pos = 0;
+    for (i = pair.uses.size(); i > 0; --i) {
+      MIOp &op = pair.uses[i-1];
+      if (op.mi->getOperand(op.index).getReg() == pair.reg) {
+        pos = &op;
+        break;
+      }
+    }
+
+    if (pos == nullptr)
+      // Reach here, it indicates all uses have been replaced. It isn't needed to advance.
+      continue;
+
+    MachineInstr *intervalEnd = pair.uses.back().mi;
+    // We should insert a extra move instruction right after the last un-replaced operand
+    // pointed by pos.
+    if (pos != &pair.uses.back()) {
+      auto &back = pair.uses.back();
+      unsigned destReg = back.mi->getOperand(back.index).getReg();
+      unsigned srcReg = pair.reg;
+      MachineBasicBlock::iterator itr = pos->mi->getParent()->end(), insertedPos;
+      MachineBasicBlock::iterator begin = pos->mi;
+
+      for (; itr != begin; --itr) {
+        insertedPos = itr;
+      }
+      tii->copyPhysReg(*pos->mi->getParent(), insertedPos, DebugLoc(), destReg, srcReg, true);
+      intervalEnd = getPrevMI(insertedPos);
+      unsigned index = li->getIndex(itr)-2;
+      li->mi2Idx[intervalEnd] = index;
+      twoAddrInstExits = false;
+    }
+
+    if (!twoAddrInstExits || i > 1) {
       if (regions.empty())
         continue;
 
@@ -1553,12 +1630,14 @@ bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
 
       // can not assign the old register to use mi
       addRegisterWithSubregs(unallocableRegs, pair.reg);
-      std::for_each(pair.uses.begin(), pair.uses.end(), [&](MIOp &op) {
+      auto begin = pair.uses.begin(), end = pair.uses.begin() + i;
+      std::for_each(begin, end, [&](MIOp &op) {
         MachineInstr *useMI = op.mi;
-        for (unsigned i = 0, e = useMI->getNumOperands(); i < e; i++)
-          if (useMI->getOperand(i).isReg() && useMI->getOperand(i).getReg() &&
-              useMI->getOperand(i).isDef())
-            addRegisterWithSubregs(unallocableRegs, useMI->getOperand(i).getReg());
+        for (unsigned j = 0, e = useMI->getNumOperands(); j < e; j++) {
+          auto mo = useMI->getOperand(j);
+          if (mo.isReg() && mo.getReg() && mo.isDef())
+            addRegisterWithSubregs(unallocableRegs, mo.getReg());
+        }
       });
 
       /**
@@ -1578,6 +1657,20 @@ bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
        * It will repeat the process, we should avoid that situation.
        */
       auto miOp = pair.uses.front();
+      LiveIntervalIdem interval;
+
+      // indicates this interval should not be spilled out into memory.
+      interval.costToSpill = UINT32_MAX;
+
+      auto from = li->getIndex(insertedPos) - 2;
+      auto to = li->getIndex(intervalEnd);
+
+      if (from > to) {
+        // this situation could occurs by loop.
+        std::swap(from, to);
+      }
+
+      interval.addRange(from, to);    // add an interval for a temporal move instr.
 
       do {
         if (shouldSpillCurrent(pair, unallocableRegs, regions)) {
@@ -1585,20 +1678,6 @@ bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
           goto UPDATE_INTERVAL;
         }
 
-        LiveIntervalIdem interval;
-
-        // indicates this interval should not be spilled out into memory.
-        interval.costToSpill = UINT32_MAX;
-
-        auto from = li->getIndex(insertedPos) - 2;
-        auto to = li->getIndex(pair.uses.back().mi);
-
-        if (from > to) {
-          // this situation could occurs by loop.
-          std::swap(from, to);
-        }
-
-        interval.addRange(from, to);    // add an interval for a temporal move instr.
         phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), &interval, unallocableRegs);
 
         if (!phyReg)
@@ -1621,17 +1700,15 @@ bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
       // li->intervals.insert(std::make_pair(phyReg, interval));
 
       assert(TargetRegisterInfo::isPhysicalRegister(phyReg));
-      miOp = pair.uses.back();
-      unsigned oldReg = miOp.mi->getOperand(miOp.index).getReg();
-      assert(phyReg != oldReg);
+      assert(phyReg != pair.reg);
 
-      // If there is two addr instr exists in the end of uses list, we just skip it.
-      size_t e = pair.uses.size() - twoAddrInstExits;
-      for (size_t i = 0; i < e; i++)
-        pair.uses[i].mi->getOperand(pair.uses[i].index).setReg(phyReg);
+      size_t e = pair.uses.size() - 1;
+      size_t limit = twoAddrInstExits ? e : i;
 
-      tii->copyPhysReg(*insertedPos->getParent(), insertedPos, DebugLoc(), phyReg, oldReg,
-                       miOp.mi->getOperand(miOp.index).isKill());
+      for (size_t k = 0; k < limit; k++)
+        pair.uses[k].mi->getOperand(pair.uses[k].index).setReg(phyReg);
+
+      tii->copyPhysReg(*insertedPos->getParent(), insertedPos, DebugLoc(), phyReg, pair.reg, true);
 
       // Note that, after replace the old register with new reg, which maybe
       // raise other anti-dependence, such as:
@@ -1644,7 +1721,7 @@ bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
       // R3 = ...
       for (auto &r : regions) {
         auto &liveIns = gather->getIdemLiveIns(&r->getEntry());
-        liveIns.erase(oldReg);
+        liveIns.erase(pair.reg);
         liveIns.insert(phyReg);
 
         /*llvm::errs()<<"[";
@@ -1655,9 +1732,9 @@ bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
         mf->dump();*/
 
         // for an iteration of each live-in register, renew the visited set.
-        auto begin = ++MachineBasicBlock::iterator(r->getEntry());
+        auto beginItr = ++MachineBasicBlock::iterator(r->getEntry());
         visited.clear();
-        collectAntiDepsTrace(phyReg, begin, r->getEntry().getParent()->end(),
+        collectAntiDepsTrace(phyReg, beginItr, r->getEntry().getParent()->end(),
                              r->getEntry().getParent(),
                              std::vector<MIOp>(),
                              std::vector<MIOp>(), visited);
@@ -1766,18 +1843,6 @@ bool IdemRegisterRenamer::handleAntiDependences(bool &needRecompute) {
         tii->copyPhysReg(*mbb, useMI, DebugLoc(), oldReg, phyReg, true);
       }
     }
-
-    // cope with other anti-dependence pair caused by inserting such move.
-    /*for (auto itr = antiDeps.begin(), end = antiDeps.end(); itr != end; ++itr) {
-      AntiDeps ad = *itr;
-      if (ad.uses.empty() || ad.defs.empty())
-        antiDeps.erase(itr);
-      else if (ad.uses.front() == pair.uses.front() && ad.reg == pair.reg) {
-        antiDeps.erase(itr); // just remove it.
-        *//*for (auto op : ad.uses)
-          op.mi->getOperand(op.index).setReg(phyReg);*//*
-      }
-    }*/
 
     {
       std::vector<std::vector<AntiDeps>::iterator> toRemoved;
