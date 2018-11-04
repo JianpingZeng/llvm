@@ -820,13 +820,12 @@ static MachineInstr *getNextMI(MachineInstr *mi) {
 void IdemRegisterRenamer::insertSpillingCodeForInterval(LiveIntervalIdem *spilledItr) {
   int frameIndex;
 
-  auto interval = spilledItr;
-  for (auto itr = interval->usepoint_begin(), end = interval->usepoint_end(); itr != end; ++itr) {
+  for (auto itr = spilledItr->usepoint_begin(), end = spilledItr->usepoint_end(); itr != end; ++itr) {
     MachineOperand *mo = itr->mo;
     MachineInstr *mi = mo->getParent();
     assert(mo->isReg());
     unsigned oldReg = mo->getReg();
-    unsigned usedReg = interval->reg;
+    unsigned usedReg = spilledItr->reg;
     mo->setReg(usedReg);
 
     const TargetRegisterClass *rc = tri->getMinimalPhysRegClass(oldReg);
@@ -843,16 +842,14 @@ void IdemRegisterRenamer::insertSpillingCodeForInterval(LiveIntervalIdem *spille
       tii->storeRegToStackSlot(*mi->getParent(), st,
                                usedReg, false, frameIndex, rc, tri);
 
-      auto copyMI = getNextMI(mi);
-      for (int i = copyMI->getNumOperands() - 1; i >= 0; --i)
-        if (copyMI->getOperand(i).isReg() && copyMI->getOperand(i).getReg() == mo->getReg()) {
-          copyMI->getOperand(i).setIsUndef(true);
-          break;
-        }
+      st = getNextMI(mi);
+      li->mi2Idx[st] = li->getIndex(mi) + 1;
 
     } else if (mo->isUse() && !mo->isKill()) {
       assert(frameIndex != INT_MIN);
       tii->loadRegFromStackSlot(*mi->getParent(), mi, usedReg, frameIndex, rc, tri);
+      auto ld = getPrevMI(mi);
+      li->mi2Idx[ld] = li->getIndex(mi) - 1;
     }
   }
 }
@@ -1046,18 +1043,28 @@ void IdemRegisterRenamer::spillCurrentUse(AntiDeps &pair) {
       assert(def != def->getParent()->end());
       auto pos = ++MachineBasicBlock::iterator(def);
       tii->storeRegToStackSlot(*def->getParent(), pos, pair.reg, true, slotFI, rc, tri);
+      auto st = getNextMI(def);
+      li->mi2Idx[st] = li->getIndex(def) + 1;
     }
   }
   else {
     // The reg must be the live in of entry block of the function.
     assert(mf->front().isLiveIn(pair.reg));
-    MachineBasicBlock::iterator pos = mf->front().front();
+    MachineBasicBlock::iterator pos = mf->front().begin();
+    for (auto end = mf->front().end(); pos != end && !tii->isIdemBoundary(pos); ) {}
+    if (!tii->isIdemBoundary(pos)) {
+      pos = mf->front().begin();
+    }
     tii->storeRegToStackSlot(mf->front(), pos, pair.reg, true, slotFI, rc, tri);
+    auto st = getPrevMI(pos);
+    li->mi2Idx[st] = li->getIndex(pos) - 1;
   }
 
   // Insert a load instruction before the first use.
   auto pos = useMO.mi;
   tii->loadRegFromStackSlot(*pos->getParent(), pos, pair.reg, slotFI, rc, tri);
+  auto ld = getPrevMI(pos);
+  li->mi2Idx[ld] = li->getIndex(pos) - 1;
 }
 
 unsigned IdemRegisterRenamer::choosePhysRegForRenaming(MachineOperand *use,
