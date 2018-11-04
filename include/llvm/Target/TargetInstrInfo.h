@@ -381,6 +381,10 @@ public:
     assert(0 && "Target didn't implement TargetInstrInfo::emitIdemBoundary!");
   }
 
+  virtual bool isMovInstr(MachineInstr *mi) const {
+    return false;
+  }
+
   /// copyPhysReg - Emit instructions to copy a pair of physical registers.
   virtual void copyPhysReg(MachineBasicBlock &MBB,
                            MachineBasicBlock::iterator MI, DebugLoc DL,

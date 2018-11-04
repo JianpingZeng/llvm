@@ -122,32 +122,6 @@ void LiveIntervalIdem::insertRangeBefore(unsigned from, unsigned to, LiveRangeId
   }
 }
 
-bool UsePoint::operator< (const UsePoint rhs) const{
-  if (id < rhs.id) return true;
-  if (id > rhs.id) return false;
-
-  MachineOperand *rhsMO = rhs.mo;
-  assert(mo->getParent() == rhsMO->getParent() && "must within same machine instr");
-  MachineInstr *mi = rhsMO->getParent();
-  int idx1 = -1, idx2 = -1;
-  for (size_t i = 0, e = mi->getNumOperands(); i < e; i++) {
-    MachineOperand &MO = mi->getOperand(i);
-    if (!mo->isReg() || !mo->getReg())
-      continue;
-
-    if (&MO == mo)
-      idx1 = i;
-    else if (&MO == rhsMO)
-      idx2 = i;
-  }
-
-
-    assert(idx1 != -1 || idx2 != -1);
-
-
-  return idx1 < idx2;
-}
-
 char LiveIntervalAnalysisIdem::ID = 0;
 INITIALIZE_PASS_BEGIN(LiveIntervalAnalysisIdem, "live-interval-idem",
                       "Live Interval computing for Register Renaming", false, false)
@@ -406,9 +380,21 @@ void LiveIntervalAnalysisIdem::insertOrCreateInterval(unsigned int reg,
     for (; itr != end; ++itr)
       intervals[reg]->addRange(itr->start, itr->end);
     // accumulate cost to be spilled.
-    intervals[reg]->costToSpill += pIdem->costToSpill;
+    if (pIdem->costToSpill == UINT32_MAX)
+      // avoiding overflow
+      intervals[reg]->costToSpill = UINT32_MAX;
+    else
+      intervals[reg]->costToSpill += pIdem->costToSpill;
     // add use points to the interval.
-    intervals[reg]->usePoints.insert(pIdem->usepoint_begin(), pIdem->usepoint_end());
+    /*if (pIdem->begin()->start == 22 && pIdem->begin()->end == 26) {
+      if (!pIdem->usepoint_begin()->mo->isReg()) {
+        llvm::errs()<<(void*)pIdem<<"\n";
+        assert(pIdem->usepoint_begin()->mo->isReg());
+      }
+    }*/
+    for (auto itr = pIdem->usepoint_begin(), end = pIdem->usepoint_end(); itr != end; ++itr)
+      intervals[reg]->addUsePoint(itr->id, itr->mo);
+    //intervals[reg]->usePoints.insert(pIdem->usepoint_begin(), pIdem->usepoint_end());
   }
   else {
     intervals.insert(std::pair<unsigned, LiveIntervalIdem *>(reg, pIdem));

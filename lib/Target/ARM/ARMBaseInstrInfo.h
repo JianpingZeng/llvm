@@ -108,6 +108,21 @@ public:
   virtual void emitIdemBoundary(MachineBasicBlock &MBB,
                                 MachineBasicBlock::iterator I) const;
 
+  virtual bool isMovInstr(MachineInstr *mi) const {
+    int Opc = mi->getOpcode();
+    switch (Opc) {
+      case ARM::VMOVS:
+      case ARM::VMOVRS:
+      case ARM::VMOVSR:
+      case ARM::VMOVD:
+      case ARM::VORRq:
+      case ARM::MOVr:
+        return true;
+      default:
+        return false;
+    }
+  }
+
   virtual void copyPhysReg(MachineBasicBlock &MBB,
                            MachineBasicBlock::iterator I, DebugLoc DL,
                            unsigned DestReg, unsigned SrcReg,

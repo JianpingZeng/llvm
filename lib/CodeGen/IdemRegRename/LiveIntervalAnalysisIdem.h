@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <set>
 #include <map>
+#include <unordered_set>
 #include "llvm/ADT/BitVector.h"
 
 namespace llvm {
@@ -58,7 +59,18 @@ public:
   unsigned id;
   MachineOperand *mo;
   UsePoint(unsigned ID, MachineOperand *MO) : id(ID), mo(MO) {}
-  bool operator< (const UsePoint rhs) const;
+};
+
+struct UsePointHasher {
+  size_t operator()(const UsePoint &up) const {
+    return (up.id << 13) ^ (size_t)up.mo;
+  }
+};
+
+struct UsePointComparator {
+  bool operator() (const UsePoint &lhs, const UsePoint &rhs) const {
+    return lhs.id == rhs.id && lhs.mo == rhs.mo;
+  }
 };
 
 class RangeIterator : public std::iterator<std::forward_iterator_tag, LiveRangeIdem*> {
@@ -92,7 +104,8 @@ public:
   unsigned reg;
   LiveRangeIdem *first;
   LiveRangeIdem *last;
-  std::set<UsePoint> usePoints;
+  typedef std::unordered_set<UsePoint, UsePointHasher, UsePointComparator> UsePointSet;
+  UsePointSet usePoints;
   /**
    * Indicates the cost of spilling out this interval into memory.
    */
@@ -103,7 +116,7 @@ public:
                        usePoints(), costToSpill(0) {}
   ~LiveIntervalIdem();
 
-  std::set<UsePoint> &getUsePoint() { return usePoints; }
+  UsePointSet &getUsePoint() { return usePoints; }
 
   void addRange(unsigned from, unsigned to);
 
@@ -124,7 +137,7 @@ public:
   RangeIterator intersectAt(LiveIntervalIdem *li);
   bool intersects(LiveIntervalIdem *cur);
 
-  typedef std::set<UsePoint>::iterator iterator;
+  typedef UsePointSet::iterator iterator;
   iterator usepoint_begin() { return usePoints.begin(); }
   iterator usepoint_end() { return usePoints.end(); }
 
