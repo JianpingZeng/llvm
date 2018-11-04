@@ -9,7 +9,6 @@
 
 #define DEBUG_TYPE "reg-renaming"
 
-
 #include <llvm/CodeGen/MachineIdempotentRegions.h>
 #include "llvm/CodeGen/Passes.h"
 #include "llvm/CodeGen/MachineFunctionPass.h"
@@ -37,6 +36,12 @@ static cl::opt<bool> EnableIdemTimeStatistic("idem-time-statistic",
                                              cl::init(false),
                                              cl::desc("Enable time statistic in idem renaming"),
                                              cl::Hidden);
+static cl::opt<unsigned> SpilledIntervalThreshold("spilled-interval-threshold",
+                                                  cl::init(20),
+                                                  cl::desc("The threshold of number of spilled intervals "
+                                                           "when considering spilling other interval or "
+                                                           "current interval"),
+                                                  cl::Hidden);
 
 /// @author Jianping Zeng.
 namespace {
@@ -980,6 +985,8 @@ unsigned IdemRegisterRenamer::tryChooseBlockedRegister(LiveIntervalIdem &interva
                  targetInter->dump(*const_cast<TargetRegisterInfo *>(tri)););
 
   getSpilledSubLiveInterval(targetInter, spilledIntervs);
+  if (spilledIntervs.size() > 20)
+    return 0;
 
   if (!spilledIntervs.empty()) {
     std::set<unsigned> allocables;
@@ -1051,7 +1058,7 @@ void IdemRegisterRenamer::spillCurrentUse(AntiDeps &pair) {
     // The reg must be the live in of entry block of the function.
     assert(mf->front().isLiveIn(pair.reg));
     MachineBasicBlock::iterator pos = mf->front().begin();
-    for (auto end = mf->front().end(); pos != end && !tii->isIdemBoundary(pos); ) {}
+    for (auto end = mf->front().end(); pos != end && !tii->isIdemBoundary(pos); ++pos) {}
     if (!tii->isIdemBoundary(pos)) {
       pos = mf->front().begin();
     }
@@ -1380,7 +1387,10 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     if (pair.uses.empty() || pair.defs.empty())
       continue;
 
+#if 0
     llvm::errs()<<antiDeps.size()<<"\n";
+#endif
+
     auto &useMO = pair.uses.front();
     mir->getRegionsContaining(*useMO.mi, &regions);
 
