@@ -439,3 +439,10 @@ void LiveIntervalAnalysisIdem::dump(std::vector<MachineBasicBlock *> &sequence) 
     llvm::errs()<<"\n";
   }
 }
+
+void LiveIntervalAnalysisIdem::removeInterval(LiveIntervalIdem *pIdem) {
+  for (auto itr = interval_begin(), end = interval_end(); itr != end; ++itr) {
+    if (itr->second == pIdem)
+      intervals.erase(itr);
+  }
+}

@@ -23,6 +23,7 @@
 #include "llvm/Target/TargetData.h"
 #include <llvm/PassSupport.h>
 #include <llvm/Support/Timer.h>
+#include "llvm/Support/Debug.h"
 
 #include "IdemUtil.h"
 #include "IdempotentRegionLiveInsGather.h"
@@ -182,7 +183,7 @@ private:
   unsigned tryChooseBlockedRegister(LiveIntervalIdem &interval,
                                     int useReg,
                                     BitVector &allocSet);
-  void getSpilledSubLiveInterval(LiveIntervalIdem *interval,
+  bool getSpilledSubLiveInterval(LiveIntervalIdem *interval,
                                  std::vector<LiveIntervalIdem *> &spilledItrs);
   void getAllocableRegs(unsigned useReg, std::set<unsigned> &allocables);
 
@@ -256,16 +257,15 @@ private:
     return false;
   }
 
-  bool willRaiseAntiDep(unsigned useReg,
-                        MachineBasicBlock::iterator begin,
-                        MachineBasicBlock::iterator end,
-                        MachineBasicBlock *mbb/*,
-                        std::set<MachineBasicBlock *> &visited*/);
+  void countRegistersRaiseAntiDep(MachineBasicBlock::iterator begin,
+                                  MachineBasicBlock::iterator end,
+                                  MachineBasicBlock *mbb,
+                                  DenseSet<unsigned> &unallocableRegs);
 
-  bool willRaiseAntiDepsInLoop(unsigned reg,
-                               const MachineBasicBlock::iterator &idem,
-                               const MachineBasicBlock::iterator &end,
-                               MachineBasicBlock *mbb);
+  void countRegisterRaiseAntiDepsInLoop(const MachineBasicBlock::iterator &idem,
+                                        const MachineBasicBlock::iterator &end,
+                                        MachineBasicBlock *mbb,
+                                        DenseSet<unsigned> &unallocableRegs);
 
   void computeAntiDepsInLoop(unsigned reg,
                              const MachineBasicBlock::iterator &idem,
@@ -283,6 +283,17 @@ private:
     }
   }
 
+  void addRegisterWithSuperRegs(DenseSet<unsigned> &set, unsigned reg) {
+    set.insert(reg);
+    if (!TargetRegisterInfo::isStackSlot(reg) &&
+    TargetRegisterInfo::isPhysicalRegister(reg)) {
+      for (const unsigned *r = tri->getSuperRegisters(reg); *r; ++r)
+        set.insert(*r);
+    }
+  }
+
+  bool numberOfSubLiveIntervalLessThanThreshold(LiveIntervalIdem *interval);
+
 private:
   const TargetInstrInfo *tii;
   const TargetRegisterInfo *tri;
@@ -299,6 +310,7 @@ private:
    * idmepotent region indicated by idem instruction.
    */
   std::map<MachineInstr*, size_t> region2NumAntiDeps;
+  BitVector reservedRegs;
 };
 }
 
@@ -423,11 +435,12 @@ void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
   }
 }
 
-bool IdemRegisterRenamer::willRaiseAntiDepsInLoop(unsigned reg,
-                                                  const MachineBasicBlock::iterator &idem,
-                                                  const MachineBasicBlock::iterator &end,
-                                                  MachineBasicBlock *mbb) {
-  if (!mbb) return false;
+void IdemRegisterRenamer::countRegisterRaiseAntiDepsInLoop(const MachineBasicBlock::iterator &idem,
+                                                           const MachineBasicBlock::iterator &end,
+                                                           MachineBasicBlock *mbb,
+                                                           DenseSet<unsigned> &unallocableRegs) {
+  if (!mbb)
+    return;
 
   std::set<MachineBasicBlock*> visited;
   std::vector<MachineBasicBlock*> worklist;
@@ -439,18 +452,28 @@ bool IdemRegisterRenamer::willRaiseAntiDepsInLoop(unsigned reg,
     if (!visited.insert(cur).second)
       continue;
 
+    bool shouldWalkSucc = true;
     if (!cur->empty()) {
       for (auto &mi : *cur) {
-        if (tii->isIdemBoundary(&mi))
-          return true;
+        if (tii->isIdemBoundary(&mi)) {
+          shouldWalkSucc = false;
+          break;
+        }
+        for (unsigned i = 0, e = mi.getNumOperands(); i < e; i++) {
+          auto mo = mi.getOperand(i);
+          if (mo.isReg() && mo.isDef() && !reservedRegs[mo.getReg()]) {
+            addRegisterWithSubregs(unallocableRegs, mo.getReg());
+            addRegisterWithSuperRegs(unallocableRegs, mo.getReg());
+          }
+        }
       }
     }
-    for (auto succ = cur->succ_begin(), end = cur->succ_end(); succ != end; ++succ)
-      if (!visited.count(*succ))
-        worklist.push_back(*succ);
+    if (shouldWalkSucc) {
+      for (auto succ = cur->succ_begin(), succEnd = cur->succ_end(); succ != succEnd; ++succ)
+        if (!visited.count(*succ))
+          worklist.push_back(*succ);
+    }
   }
-
-  return false;
 }
 
 void IdemRegisterRenamer::computeAntiDepsInLoop(unsigned reg,
@@ -583,7 +606,7 @@ bool IdemRegisterRenamer::isTwoAddressInstr(MachineInstr *useMI, unsigned reg) {
  */
 bool IdemRegisterRenamer::legalToReplace(unsigned newReg, unsigned oldReg) {
   if (newReg == 0 || TargetRegisterInfo::isVirtualRegister(newReg) ||
-      tri->getReservedRegs(*mf)[newReg])
+      reservedRegs[newReg])
     return false;
 
   for (unsigned i = 0, e = tri->getNumRegClasses(); i < e; i++) {
@@ -701,11 +724,11 @@ unsigned IdemRegisterRenamer::tryChooseFreeRegister(LiveIntervalIdem &interval,
   return 0;
 }
 
-void IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
+bool IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
                                                     std::vector<LiveIntervalIdem *> &spilledItrs) {
 
   // We need to assign the same register to the use point in the two address instruction.
-  std::set<std::pair<MachineInstr*, unsigned>> twoAddrInstrs;
+  std::vector<LiveIntervalIdem *> buf;
   for (auto begin = interval->usepoint_begin(),
            end = interval->usepoint_end(); begin != end; ++begin) {
     /*if (isTwoAddressInstr(begin->mo->getParent(), interval->reg)) {
@@ -717,10 +740,10 @@ void IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
       unsigned from, to;
       if (begin->mo->isUse()) {
         to = li->mi2Idx[begin->mo->getParent()];
-        from = to - 2;
+        from = to - 1;
       } else {
         from = li->mi2Idx[begin->mo->getParent()];
-        to = from + 2;
+        to = from + 1;
       }
       verifyLI->addRange(from, to);
 
@@ -728,9 +751,17 @@ void IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
       verifyLI->reg = interval->reg;
       // tells compiler not to evict this spilling interval.
       verifyLI->costToSpill = UINT32_MAX;
-      spilledItrs.push_back(verifyLI);
+      buf.push_back(verifyLI);
     }
   }
+
+  if (buf.size() > SpilledIntervalThreshold)
+    return false;
+
+  // Delete the targetInter from LiveIntervalAnalysisIdem
+  li->removeInterval(interval);
+  spilledItrs.insert(spilledItrs.end(), buf.begin(), buf.end());
+  return true;
 
   /*for (std::pair<MachineInstr*, unsigned > pair : twoAddrInstrs) {
     MachineInstr *mi = pair.first;
@@ -878,6 +909,14 @@ void IdemRegisterRenamer::processHandledIntervals(std::vector<LiveIntervalIdem *
   }
 }
 
+bool IdemRegisterRenamer::numberOfSubLiveIntervalLessThanThreshold(LiveIntervalIdem *interval) {
+  long res =  0;
+  for(auto itr = interval->usepoint_begin(), end = interval->usepoint_end(); itr != end; ++itr)
+    ++res;
+
+  return res < SpilledIntervalThreshold;
+}
+
 void IdemRegisterRenamer::assignRegOrStackSlotAtInterval(std::set<unsigned> &allocables,
                                                          LiveIntervalIdem *interval,
                                                          std::vector<LiveIntervalIdem *> &handled,
@@ -891,16 +930,19 @@ void IdemRegisterRenamer::assignRegOrStackSlotAtInterval(std::set<unsigned> &all
   }
   if (freeReg == 0) {
     // select a handled interval to be spilled out into memory.
-    LiveIntervalIdem *spilledItr = nullptr;
-    for (LiveIntervalIdem *itr : handled) {
-      if (legalToReplace(itr->reg, interval->reg) &&
-          (!spilledItr || itr->costToSpill < spilledItr->costToSpill))
+    std::vector<LiveIntervalIdem*>::iterator spilledItr = handled.end();
+    for (auto itr = handled.begin(), end = handled.end(); itr != end; ++itr) {
+      if ((legalToReplace((*itr)->reg, interval->reg) &&
+          numberOfSubLiveIntervalLessThanThreshold(*itr)) &&
+          (spilledItr == end || ((*itr)->costToSpill < (*spilledItr)->costToSpill)))
         spilledItr = itr;
     }
-    assert(spilledItr && "Must have one interval to be spilled choosen!");
-    freeReg = spilledItr->reg;
 
-    getSpilledSubLiveInterval(spilledItr, spilled);
+    assert(spilledItr != handled.end());
+    bool res = getSpilledSubLiveInterval(*spilledItr, spilled);
+    assert(res && "Should allocate register for those interval with infinity weight!");
+    freeReg = (*spilledItr)->reg;
+    handled.erase(spilledItr);
   }
 
   assert(freeReg != 0 && "No free register found!");
@@ -984,8 +1026,7 @@ unsigned IdemRegisterRenamer::tryChooseBlockedRegister(LiveIntervalIdem &interva
                  llvm::errs() << "\nSelected evicted interval is: ";
                  targetInter->dump(*const_cast<TargetRegisterInfo *>(tri)););
 
-  getSpilledSubLiveInterval(targetInter, spilledIntervs);
-  if (spilledIntervs.size() > 20)
+  if (!getSpilledSubLiveInterval(targetInter, spilledIntervs))
     return 0;
 
   if (!spilledIntervs.empty()) {
@@ -1337,36 +1378,32 @@ void IdemRegisterRenamer::updateLiveInOfPriorRegions(MachineBasicBlock::reverse_
   });
 }
 
-bool IdemRegisterRenamer::willRaiseAntiDep(unsigned useReg,
-                                           MachineBasicBlock::iterator begin,
-                                           MachineBasicBlock::iterator end,
-                                           MachineBasicBlock *mbb/*,
-                                           std::set<MachineBasicBlock *> &visited*/) {
+void IdemRegisterRenamer::countRegistersRaiseAntiDep(MachineBasicBlock::iterator begin,
+                                                     MachineBasicBlock::iterator end,
+                                                     MachineBasicBlock *mbb,
+                                                     DenseSet<unsigned> &unallocableRegs) {
   if (!mbb)
-    return false;
+    return;
 
   for (; begin != end; ++begin) {
     if (tii->isIdemBoundary(&*begin))
-      return false;
+      return;
     for (unsigned i = 0, e = begin->getNumOperands(); i < e; i++) {
       auto mo = begin->getOperand(i);
-      if (mo.isReg() && mo.isDef() && partialEquals(mo.getReg(), useReg))
-        return true;
+      if (mo.isReg() && mo.isDef() && !reservedRegs[mo.getReg()]) {
+        addRegisterWithSubregs(unallocableRegs, mo.getReg());
+        addRegisterWithSuperRegs(unallocableRegs, mo.getReg());
+      }
     }
   }
 
-  for (auto itr = mbb->succ_begin(),succEnd = mbb->succ_end(); itr != succEnd; ++itr){
+  for (auto itr = mbb->succ_begin(),succEnd = mbb->succ_end(); itr != succEnd; ++itr) {
     auto succ = *itr;
-    bool res;
     if (!dt->dominates(succ, mbb))
-      res = willRaiseAntiDep(useReg, succ->begin(), succ->end(), succ/*, visited*/);
+      countRegistersRaiseAntiDep(succ->begin(), succ->end(), succ, unallocableRegs);
     else
-      res = willRaiseAntiDepsInLoop(useReg, succ->begin(), succ->end(), succ);
-
-    if (res)
-      return true;
+      countRegisterRaiseAntiDepsInLoop(succ->begin(), succ->end(), succ, unallocableRegs);
   }
-  return false;
 }
 
 bool IdemRegisterRenamer::handleAntiDependences() {
@@ -1381,15 +1418,14 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       t.startTimer();
     }
 
+    /*dbgs()<<antiDeps.size()<<"\n";
+    mf->dump();*/
+
     auto pair = antiDeps.front();
     antiDeps.erase(antiDeps.begin());
 
     if (pair.uses.empty() || pair.defs.empty())
       continue;
-
-#if 0
-    llvm::errs()<<antiDeps.size()<<"\n";
-#endif
 
     auto &useMO = pair.uses.front();
     mir->getRegionsContaining(*useMO.mi, &regions);
@@ -1749,23 +1785,13 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       }
 
       interval->addRange(from, to);    // add an interval for a temporal move instr.
+      if (shouldSpillCurrent(pair.reg, unallocableRegs, regions)) {
+        spillCurrentUse(pair);
+        goto UPDATE_INTERVAL;
+      }
 
-      do {
-        if (shouldSpillCurrent(pair.reg, unallocableRegs, regions)) {
-          spillCurrentUse(pair);
-          goto UPDATE_INTERVAL;
-        }
-
-        phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), interval, unallocableRegs);
-
-        if (!phyReg)
-          break;
-
-        if (!willRaiseAntiDep(phyReg, useMO.mi, useMO.mi->getParent()->end(), useMO.mi->getParent()))
-          break;
-
-        addRegisterWithSubregs(unallocableRegs, phyReg);
-      }while (true);
+      countRegistersRaiseAntiDep(useMO.mi, useMO.mi->getParent()->end(), useMO.mi->getParent(), unallocableRegs);
+      phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), interval, unallocableRegs);
 
       if (!phyReg) {
         spillCurrentUse(pair);
@@ -1773,7 +1799,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       }
 
       assert(insertedPos);
-
       assert(TargetRegisterInfo::isPhysicalRegister(phyReg));
       assert(phyReg != pair.reg);
 
@@ -1930,7 +1955,6 @@ UPDATE_INTERVAL:
   gather->run();*/
   if (EnableIdemTimeStatistic)
     t.stopTimer();
-  continue;
   }
   return true;
 }
@@ -1955,6 +1979,7 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   mf = &MF;
   mri = &MF.getRegInfo();
   mfi = MF.getFrameInfo();
+  reservedRegs = tri->getReservedRegs(*mf);
 
   // Collects anti-dependences operand pair.
   /*llvm::errs() << "Before renaming2: \n";

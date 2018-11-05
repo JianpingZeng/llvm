@@ -268,6 +268,7 @@ public:
   void insertOrCreateInterval(unsigned int reg, LiveIntervalIdem *pIdem);
 
   void dump(std::vector<MachineBasicBlock *> &sequence);
+  void removeInterval(LiveIntervalIdem *pIdem);
 };
 }
 
