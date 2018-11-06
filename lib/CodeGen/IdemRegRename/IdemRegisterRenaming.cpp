@@ -675,7 +675,7 @@ unsigned RegisterRenaming::tryChooseFreeRegister(LiveIntervalIdem &interval,
                                                  int useReg,
                                                  BitVector &allocSet) {
   IDEM_DEBUG(llvm::errs() << "Interval for move instr: ";
-                 interval.dump(*const_cast<TargetRegisterInfo *>(tri));
+                 interval.dump(tri);
                  llvm::errs() << "\n";);
 
   for (int physReg = allocSet.find_first(); physReg > 0; physReg = allocSet.find_next(physReg)) {
@@ -683,7 +683,7 @@ unsigned RegisterRenaming::tryChooseFreeRegister(LiveIntervalIdem &interval,
       LiveIntervalIdem *itrv = li->intervals[physReg];
 
       IDEM_DEBUG(llvm::errs() << "Candidate interval: ";
-                     itrv->dump(*const_cast<TargetRegisterInfo *>(tri));
+                     itrv->dump(tri);
                      llvm::errs() << "\n";);
 
       if (!itrv->intersects(&interval)) {
@@ -762,7 +762,7 @@ unsigned RegisterRenaming::tryChooseBlockedRegister(LiveIntervalIdem &interval,
   IDEM_DEBUG(llvm::errs() << "Selected evicted physical register is: "
                           << tri->getName(targetInter->reg) << "\n";
                  llvm::errs() << "\nSelected evicted interval is: ";
-                 targetInter->dump(*const_cast<TargetRegisterInfo *>(tri)););
+                 targetInter->dump(tri););
 
   getSpilledSubLiveInterval(targetInter, spilledIntervs);
 
@@ -855,7 +855,7 @@ void RegisterRenaming::revisitSpilledInterval(std::set<unsigned> &allocables,
   while (!unhandled.empty()) {
     auto cur = unhandled.top();
     unhandled.pop();
-    cur->dump(*const_cast<TargetRegisterInfo*>(tri));
+    cur->dump(tri);
     if (!cur->empty()) {
       processHandledIntervals(handled, cur->beginNumber());
     }

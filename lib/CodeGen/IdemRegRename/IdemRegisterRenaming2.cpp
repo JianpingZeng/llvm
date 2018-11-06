@@ -529,11 +529,8 @@ void IdemRegisterRenamer::gatherAntiDeps(MachineInstr *idem) {
 
   auto begin = ++MachineBasicBlock::iterator(idem);
   for (auto reg : liveIns) {
-  /*if (idem->getParent()->getName() == "if.end35"*//* && reg == 61*//*) {
-      llvm::errs()<<"LiveIns: [";
-      for (auto reg : liveIns)
-        llvm::errs()<<tri->getName(reg)<<", ";
-      llvm::errs()<<"]\n";
+    /*if (idem->getParent()->getName() == "entry" && reg == 58) {
+      idem->getParent()->dump();
     }*/
 
     std::set<MachineBasicBlock*> visited;
@@ -695,7 +692,7 @@ unsigned IdemRegisterRenamer::tryChooseFreeRegister(LiveIntervalIdem &interval,
                                                     int useReg,
                                                     BitVector &allocSet) {
   IDEM_DEBUG(llvm::errs() << "Interval for move instr: ";
-                 interval.dump(*const_cast<TargetRegisterInfo *>(tri));
+                 interval.dump(tri);
                  llvm::errs() << "\n";);
 
   for (int physReg = allocSet.find_first(); physReg > 0; physReg = allocSet.find_next(physReg)) {
@@ -703,7 +700,7 @@ unsigned IdemRegisterRenamer::tryChooseFreeRegister(LiveIntervalIdem &interval,
       LiveIntervalIdem *itrv = li->intervals[physReg];
 
       IDEM_DEBUG(llvm::errs() << "Candidate interval: ";
-                     itrv->dump(*const_cast<TargetRegisterInfo *>(tri));
+                     itrv->dump(tri);
                      llvm::errs() << "\n";);
 
       if (!itrv->intersects(&interval)) {
@@ -798,7 +795,8 @@ void IdemRegisterRenamer::getAllocableRegs(unsigned useReg, std::set<unsigned> &
     auto rc = tri->getRegClass(i);
     if (rc->contains(useReg))
       for (auto reg : rc->getRawAllocationOrder(*mf))
-        allocables.insert(reg);
+        if (!reservedRegs[reg])
+          allocables.insert(reg);
   }
 }
 
@@ -886,6 +884,31 @@ void IdemRegisterRenamer::insertSpillingCodeForInterval(LiveIntervalIdem *spille
       tii->loadRegFromStackSlot(*mi->getParent(), mi, usedReg, frameIndex, rc, tri);
       auto ld = getPrevMI(mi);
       li->mi2Idx[ld] = li->getIndex(mi) - 1;
+
+      std::vector<IdempotentRegion*> regions;
+      mir->getRegionsContaining(*mi, &regions);
+      std::set<MachineBasicBlock*> visited;
+
+      for (auto &r : regions) {
+        auto &liveIns = gather->getIdemLiveIns(&r->getEntry());
+        liveIns.erase(oldReg);
+        liveIns.insert(usedReg);
+
+        // for an iteration of each live-in register, renew the visited set.
+        auto beginItr = ++MachineBasicBlock::iterator(r->getEntry());
+        visited.clear();
+        collectAntiDepsTrace(usedReg, beginItr, r->getEntry().getParent()->end(),
+                             r->getEntry().getParent(),
+                             std::vector<MIOp>(),
+                             std::vector<MIOp>(), visited);
+
+        // FIXME Update the live in registers for the region where insertedPos instr resides
+        auto mbb = r->getEntry().getParent();
+        visited.clear();
+        bool seenRedef = false;
+        updateLiveInOfPriorRegions(MachineBasicBlock::reverse_iterator(r->getEntry()),
+                                   mbb->rend(), mbb, visited, oldReg, seenRedef);
+      }
     }
   }
 }
@@ -1024,7 +1047,7 @@ unsigned IdemRegisterRenamer::tryChooseBlockedRegister(LiveIntervalIdem &interva
   IDEM_DEBUG(llvm::errs() << "Selected evicted physical register is: "
                           << tri->getName(targetInter->reg) << "\n";
                  llvm::errs() << "\nSelected evicted interval is: ";
-                 targetInter->dump(*const_cast<TargetRegisterInfo *>(tri)););
+                 targetInter->dump(tri););
 
   if (!getSpilledSubLiveInterval(targetInter, spilledIntervs))
     return 0;
@@ -1428,7 +1451,274 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       continue;
 
     auto &useMO = pair.uses.front();
+    auto &defMO = pair.defs.back();
     mir->getRegionsContaining(*useMO.mi, &regions);
+
+    bool useOverlapped = useMO.mi->getOperand(useMO.index).getReg() != pair.reg;
+    bool defOverlapped = defMO.mi->getOperand(defMO.index).getReg() != pair.reg;
+    if (useOverlapped) {
+      //======================================================================================= //
+      // Handle the case that uses of different anti-dependence overlap
+      //======================================================================================= //
+      std::vector<MIOp>::iterator pos2 = pair.uses.end()-1;
+      if (isTwoAddressInstr(pos2->mi, pair.reg)) {
+        MachineBasicBlock::iterator begin = pos2->mi->getParent()->begin(),
+            end = pos2->mi->getParent()->end(), prev;
+        for (; begin != end; ++begin){
+          if (begin == pos2->mi) {
+            break;
+          }
+          prev = begin;
+        }
+        assert(prev != pos2->mi->getParent()->end());
+        if (prev != MachineBasicBlock::iterator() && tii->isMovInstr(prev)) {
+          if (prev->getOperand(0).getReg() == pair.reg) {
+            // Such as,
+            // R0 = R3
+            // R0 = LDR_PRE R0, R1
+            pair.defs.clear();
+            pair.defs.emplace_back(prev, 0);
+            pair.uses.pop_back();
+
+            assert(prev->getOperand(1).isReg());
+            unsigned destReg = prev->getOperand(1).getReg();
+
+            pos2 = pair.uses.end() - 1;
+
+            // Insert a move from old register to destination register.
+            MachineBasicBlock::iterator itr = pos2->mi->getParent()->end(), insertedPos;
+            MachineBasicBlock::iterator beginPos = pos2->mi;
+
+            for (; itr != beginPos; --itr) {
+              insertedPos = itr;
+            }
+            tii->copyPhysReg(*pos2->mi->getParent(), insertedPos, DebugLoc(), destReg, pair.reg, true);
+            auto copyMI = getPrevMI(insertedPos);
+            li->mi2Idx[copyMI] = li->getIndex(pos2->mi) + 1;
+            pair.uses.emplace_back(copyMI, 1);
+          }
+          else if (prev->getOperand(1).getReg() == pair.reg) {
+            // Such as,
+            // R3 = R0
+            // R3 = LDR_PRE R3, R1
+            continue;
+          }
+        }
+      }
+      auto pos = pair.uses.begin();
+      while (pos != pair.uses.end()) {
+        MIOp &op = *pos;
+        if (op.mi->getOperand(op.index).getReg() != pair.reg) {
+          // move the pos to the first modified MIOp.
+          ++pos;
+        }
+        else
+          break;
+      }
+
+      if (pos == pair.uses.end())
+        // Reach here, it indicates all uses have been replaced. It isn't needed to advance.
+        continue;
+
+      if (pos != pair.uses.begin()) {
+        // modified [begin, pos)
+        unsigned useReg = pair.uses.front().mi->getOperand(pair.uses.front().index).getReg();
+        DenseSet<unsigned> unallocableRegs;
+        addRegisterWithSubregs(unallocableRegs, pair.reg);
+        auto begin = pair.uses.begin();
+        std::for_each(begin, pos, [&](MIOp &op) {
+          MachineInstr *useMI = op.mi;
+          for (unsigned j = 0, e = useMI->getNumOperands(); j < e; j++) {
+            auto mo = useMI->getOperand(j);
+            if (mo.isReg() && mo.getReg() && mo.isDef())
+              addRegisterWithSubregs(unallocableRegs, mo.getReg());
+          }
+        });
+
+        if (!unallocableRegs.count(useReg)) {
+          unsigned from = li->getIndex(pair.uses.front().mi);
+          unsigned to = li->getIndex((pos-1)->mi);
+          if (from < to)
+            std::swap(from, to);
+
+          LiveIntervalIdem *itrv = new LiveIntervalIdem;
+          itrv->addRange(from, to);
+          std::for_each(begin, pos, [&](MIOp &op) {
+            itrv->addUsePoint(li->getIndex(op.mi), &op.mi->getOperand(op.index));
+          });
+
+          bool interfere = false;
+          for (auto itr = li->interval_begin(), end = li->interval_end(); itr != end; ++itr) {
+            if (itr->second->intersects(itrv)) {
+              interfere = true;
+              break;
+            }
+          }
+
+          if (!interfere) {
+            std::for_each(begin, pos, [&](MIOp &op) {
+              MachineInstr *useMI = op.mi;
+              for (unsigned j = 0, e = useMI->getNumOperands(); j < e; j++) {
+                auto mo = useMI->getOperand(j);
+                if (mo.isReg() && mo.getReg() && mo.getReg() == pair.reg)
+                  mo.setReg(useReg);
+              }
+            });
+
+            itrv->reg = pair.reg;
+            li->removeInterval(itrv);
+
+            itrv->reg = useReg;
+            li->insertOrCreateInterval(useReg, itrv);
+            continue;
+          }
+        }
+
+        // delete those modified uses.
+        pair.uses.erase(pair.uses.begin(), pos);
+        // if all uses have been replaced, just continue to cope with next
+        if (pair.uses.empty())
+          continue;
+      }
+
+      pos = pair.defs.begin();
+      while (pos != pair.defs.end()) {
+        if (pos->mi->getOperand(pos->index).getReg() != pair.reg)
+          ++pos;
+        else
+          break;
+      }
+
+      // [begin, pos) have been modified.
+      pair.defs.erase(pair.defs.begin(), pos);
+
+      if (pair.defs.empty())
+        continue;
+    }
+    if (defOverlapped) {
+      //======================================================================================= //
+      // Handle the case that defs of different anti-dependence overlap
+      // We don't need to cope with those def registers have replaced in the previous round if exist
+      //======================================================================================= //
+
+      /**
+     * -------   -------
+     * ...=R0    ...=R0
+     *   \      /
+     *    \    /
+     *     v v
+     *    ...=R0
+     *     ...
+     *    R0=...
+     *
+     * Transformed into:
+     *
+     * R2 = R0
+     * -------   -------
+     * ...=R2    ...=R0
+     *   \       R2 = R0  (extra move instruction to preserve the program semantics)
+     *   \      /
+     *    \    /
+     *     v v
+     *    ...=R2
+     *     ...
+     *    R0=...
+     */
+      std::vector<MIOp>::iterator pos2 = pair.uses.end()-1;
+      if (isTwoAddressInstr(pos2->mi, pair.reg)) {
+        MachineBasicBlock::iterator begin = pos2->mi->getParent()->begin(),
+            end = pos2->mi->getParent()->end(), prev;
+        for (; begin != end; ++begin){
+          if (begin == pos2->mi) {
+            break;
+          }
+          prev = begin;
+        }
+        assert(prev != pos2->mi->getParent()->end());
+        if (prev != MachineBasicBlock::iterator() && tii->isMovInstr(prev)) {
+          if (prev->getOperand(0).getReg() == pair.reg) {
+            // Such as,
+            // R0 = R3
+            // R0 = LDR_PRE R0, R1
+            pair.defs.clear();
+            pair.defs.emplace_back(prev, 0);
+            pair.uses.pop_back();
+
+            assert(prev->getOperand(1).isReg());
+            unsigned destReg = prev->getOperand(1).getReg();
+
+            pos2 = pair.uses.end() - 1;
+
+            // Insert a move from old register to destination register.
+            MachineBasicBlock::iterator itr = pos2->mi->getParent()->end(), insertedPos;
+            MachineBasicBlock::iterator beginPos = pos2->mi;
+
+            for (; itr != beginPos; --itr) {
+              insertedPos = itr;
+            }
+            tii->copyPhysReg(*pos2->mi->getParent(), insertedPos, DebugLoc(), destReg, pair.reg, true);
+            auto copyMI = getPrevMI(insertedPos);
+            li->mi2Idx[copyMI] = li->getIndex(pos2->mi) + 1;
+            pair.uses.emplace_back(copyMI, 1);
+          }
+          else if (prev->getOperand(1).getReg() == pair.reg) {
+            // Such as,
+            // R3 = R0
+            // R3 = LDR_PRE R3, R1
+            continue;
+          }
+        }
+      }
+
+      auto pos = pair.defs.begin();
+      while (pos != pair.defs.end()) {
+        if (pos->mi->getOperand(pos->index).getReg() == pair.reg)
+          ++pos;
+        else
+          break;
+      }
+
+      // delete those elements within the range [pos, end)
+      pair.defs.erase(pos, pair.defs.end());
+      if (pair.defs.empty())
+        continue;
+
+      // We should insert a extra move instruction right after the last un-replaced operand
+      // pointed by pos.
+      pos2 = pair.uses.begin();
+      while (pos2 != pair.uses.end()) {
+        if (pos2->mi->getOperand(pos2->index).getReg() == pair.reg)
+          ++pos2;
+        else
+          break;
+      }
+
+      if (pos2 != pair.uses.end()) {
+        // move the pos2 to the position where pos2 pointer to the last unmodified MIOp
+        --pos2;
+        unsigned destReg = pair.reg;
+        unsigned srcReg = pair.reg;
+        MachineBasicBlock::iterator itr = pos2->mi->getParent()->end(), insertedPos;
+        MachineBasicBlock::iterator begin = pos2->mi;
+
+        for (; itr != begin; --itr) {
+          insertedPos = itr;
+        }
+
+        tii->copyPhysReg(*pos->mi->getParent(), insertedPos, DebugLoc(), destReg, srcReg, true);
+        auto mov = getPrevMI(insertedPos);
+        unsigned index = li->getIndex(itr)-2;
+        li->mi2Idx[mov] = index;
+
+        ++pos2;
+        pair.uses.erase(pos, pair.uses.end());
+        pair.uses.emplace_back(mov, 1);
+        // twoAddrInstExits = false;
+      }
+    }
+
+    MachineInstr *intervalEnd = pair.uses.back().mi;
+    MIOp &miLastDef = pair.defs.back();
 
     // Try to replace the old register name with other register to reduce
     // inserted move instruction.
@@ -1438,19 +1728,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     // as the current region.
     std::vector<MIOp> usesAndDef;
     bool canReplace = false;
-    // We don't need to cope with those def registers have replaced in the previous round
-    size_t i;
-    for (i = pair.defs.size(); i > 0; --i) {
-      auto &op = pair.defs[i-1];
-      if (op.mi->getOperand(op.index).getReg() != pair.reg)
-        continue;
-      else
-        break;
-    }
-    if (i == 0)
-      continue;
-
-    MIOp &miLastDef = pair.defs[i-1];
 
     // get the last insertion position of previous adjacent region
     // or the position of prior instruction depends on if the current instr
@@ -1466,7 +1743,8 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         miLastDef.mi->getParent(), pair.reg, visited, canReplace);
 
     // If the current reg is used in ret instr, we can't replace it.
-    if (!twoAddrInstExits && canReplace) {
+    canReplace &= !twoAddrInstExits;
+    if (canReplace) {
       // We don't replace the name of R0 in ARM and x86 architecture.
       // Because R0 is implicitly used by return instr.
 
@@ -1514,7 +1792,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
 
       // indicates this interval should not be spilled out into memory.
       itrvl->costToSpill = UINT32_MAX;
-      std::vector<MIOp>::iterator begin = pair.defs.begin(), end = pair.defs.begin()+i;
+      std::vector<MIOp>::iterator begin = pair.defs.begin(), end = pair.defs.end();
 
       if (from > to) {
         // this situation could occurs caused by loop.
@@ -1608,103 +1886,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     // get the free register
     unsigned phyReg = 0;
 
-    /**
-     * -------   -------
-     * ...=R0    ...=R0
-     *   \      /
-     *    \    /
-     *     v v
-     *    ...=R0
-     *     ...
-     *    R0=...
-     *
-     * Transformed into:
-     *
-     * R2 = R0
-     * -------   -------
-     * ...=R2    ...=R0
-     *   \       R2 = R0  (extra move instruction to preserve the program semantics)
-     *   \      /
-     *    \    /
-     *     v v
-     *    ...=R2
-     *     ...
-     *    R0=...
-     */
-    std::vector<MIOp>::iterator pos = pair.uses.end()-1;
-    if (isTwoAddressInstr(pos->mi, pair.reg)) {
-      MachineBasicBlock::iterator begin = pos->mi->getParent()->begin(),
-      end = pos->mi->getParent()->end(), prev;
-      for (; begin != end; ++begin){
-        if (begin == pos->mi) {
-          break;
-        }
-        prev = begin;
-      }
-      assert(prev != pos->mi->getParent()->end());
-      if (prev != MachineBasicBlock::iterator() &&
-            tii->isMovInstr(prev) && prev->getOperand(0).isReg() &&
-            prev->getOperand(0).getReg() == pair.reg) {
-        assert(prev->getOperand(1).isReg());
-        unsigned destReg = prev->getOperand(1).getReg();
-
-        pair.uses.pop_back();
-        pos = pair.uses.end() - 1;
-        pair.defs.erase(pair.defs.begin());
-
-        // Insert a move from old register to destination register.
-        MachineBasicBlock::iterator itr = pos->mi->getParent()->end(), insertedPos;
-        MachineBasicBlock::iterator beginPos = pos->mi;
-
-        for (; itr != beginPos; --itr) {
-          insertedPos = itr;
-        }
-        tii->copyPhysReg(*pos->mi->getParent(), insertedPos, DebugLoc(), destReg, pair.reg, true);
-        auto copyMI = getPrevMI(insertedPos);
-        pair.uses.emplace_back(copyMI, 1);
-        continue;
-      }
-    }
-
-    pos = pair.uses.end();
-    while (pos != pair.uses.begin()) {
-      --pos;
-      MIOp &op = *pos;
-      if (op.mi->getOperand(op.index).getReg() == pair.reg) {
-        // move the pos to the first modified MIOp.
-        ++pos;
-        break;
-      }
-    }
-
-    if (pos == pair.uses.begin())
-      // Reach here, it indicates all uses have been replaced. It isn't needed to advance.
-      continue;
-
-    MachineInstr *intervalEnd = pair.uses.back().mi;
-    // We should insert a extra move instruction right after the last un-replaced operand
-    // pointed by pos.
-    if (pos != pair.uses.end()) {
-      auto &back = pair.uses.back();
-      unsigned destReg = back.mi->getOperand(back.index).getReg();
-      unsigned srcReg = pair.reg;
-      MachineBasicBlock::iterator itr = pos->mi->getParent()->end(), insertedPos;
-      MachineBasicBlock::iterator begin = pos->mi;
-
-      for (; itr != begin; --itr) {
-        insertedPos = itr;
-      }
-      tii->copyPhysReg(*pos->mi->getParent(), insertedPos, DebugLoc(), destReg, srcReg, true);
-      intervalEnd = getPrevMI(insertedPos);
-      unsigned index = li->getIndex(itr)-2;
-      li->mi2Idx[intervalEnd] = index;
-      pair.uses.erase(pos, pair.uses.end());
-      pair.uses.emplace_back(intervalEnd, 1);
-
-      twoAddrInstExits = false;
-    }
-
-    if (!twoAddrInstExits || i > 1) {
+    if (!twoAddrInstExits || pair.defs.size() > 1) {
       if (regions.empty())
         continue;
 
@@ -1807,6 +1989,8 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         pair.uses[k].mi->getOperand(pair.uses[k].index).setReg(phyReg);
 
       tii->copyPhysReg(*insertedPos->getParent(), insertedPos, DebugLoc(), phyReg, pair.reg, true);
+      auto copy = getPrevMI(insertedPos);
+      li->mi2Idx[copy] = li->getIndex(insertedPos) - 1;
 
       // Update the internal data structure of live interval analysis
       li->insertOrCreateInterval(phyReg, interval);
@@ -1920,6 +2104,8 @@ bool IdemRegisterRenamer::handleAntiDependences() {
 
         // We must insert move firstly, and than substitute the old reg with new reg.
         tii->copyPhysReg(*mbb, useMI, DebugLoc(), phyReg,  oldReg, useMI->getOperand(moIndex).isKill());
+        auto copy = getPrevMI(useMI);
+        li->mi2Idx[copy] = li->getIndex(useMI) - 1;
 
         for (unsigned k = 0, e = useMI->getNumOperands(); k < e; k++) {
           MachineOperand& mo = useMI->getOperand(k);
@@ -1937,6 +2123,8 @@ bool IdemRegisterRenamer::handleAntiDependences() {
 
         // We must insert move firstly, and than substitute the old reg with new reg.
         tii->copyPhysReg(*mbb, useMI, DebugLoc(), oldReg, phyReg, true);
+        auto copy = getPrevMI(useMI);
+        li->mi2Idx[copy] = li->getIndex(useMI) - 1;
       }
     }
 

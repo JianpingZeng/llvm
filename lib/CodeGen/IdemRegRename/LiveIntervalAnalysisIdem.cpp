@@ -45,25 +45,33 @@ LiveIntervalIdem::~LiveIntervalIdem() {
 
 void LiveIntervalIdem::addRange(unsigned from, unsigned to) {
   assert(from <= to && "Invalid range!");
-  if (first == nullptr || to < first->end)
+  if (first == nullptr || to <= first->end)
     insertRangeBefore(from, to, first);
   else {
-    LiveRangeIdem **r = &first;
+    LiveRangeIdem **r = &first, *prevPos = nullptr;
     while (*r != nullptr) {
-      if (to >= (*r)->end)
+      if (to > (*r)->end) {
+        prevPos = *r;
         r = &(*r)->next;
+      }
       else
         break;
     }
-    insertRangeBefore(from, to, *r);
+
+    // insert the range in the tailing of linked list.
+    if (!*r) {
+      last = new LiveRangeIdem(from, to, nullptr, prevPos);
+    }
+    else
+      insertRangeBefore(from, to, *r);
   }
 }
 
-void LiveIntervalIdem::print(llvm::raw_ostream &OS, const TargetRegisterInfo &tri) {
-  OS << (TargetRegisterInfo::isPhysicalRegister(reg) ?
-         tri.getName(reg) : ("%vreg" + reg));
+void LiveIntervalIdem::print(llvm::raw_ostream &OS, const TargetRegisterInfo *tri) {
+  OS << (TargetRegisterInfo::isPhysicalRegister(reg) && tri ?
+         tri->getName(reg) : ("%vreg" + reg));
   LiveRangeIdem *r = first;
-  while (r && r != nullptr) {
+  while (r != nullptr) {
     r->dump();
     OS << ",";
     r = r->next;
@@ -105,11 +113,11 @@ RangeIterator LiveIntervalIdem::intersectAt(LiveIntervalIdem *li) {
 }
 
 void LiveIntervalIdem::insertRangeBefore(unsigned from, unsigned to, LiveRangeIdem *&cur) {
-  assert((cur == nullptr || to < cur->end) && "Not inserting at begining of interval");
+  assert((cur == nullptr || to <= cur->end) && "Not inserting at begining of interval");
   if (!cur) {
-    //assert(!last);
-    //assert(cur == first && "current node should be the first!");
-    last = cur = new LiveRangeIdem(from, to, nullptr);
+    assert(!last);
+    assert(cur == first && "current node should be the first!");
+    last = cur = new LiveRangeIdem(from, to, nullptr, nullptr);
     return;
   }
   if (cur->start <= to) {
@@ -118,8 +126,50 @@ void LiveIntervalIdem::insertRangeBefore(unsigned from, unsigned to, LiveRangeId
     cur->end = std::max(to, cur->end);
   }
   else {
-      cur = new LiveRangeIdem(from, to, cur);
+    cur = new LiveRangeIdem(from, to, cur, cur->prev);
   }
+}
+
+RangeIterator LiveIntervalIdem::upperBound(RangeIterator begin, RangeIterator end,
+    unsigned key) {
+  for (; begin != end; ++begin) {
+    if (begin->start > key)
+      return begin;
+  }
+  return end;
+}
+
+void LiveIntervalIdem::removeRange(unsigned from, unsigned to) {
+  if (to <= beginNumber() || from >= endNumber())
+    return;
+  RangeIterator upper = upperBound(begin(), end(), from);
+  if (upper == end())
+    upper = RangeIterator(last);
+  else
+    --upper;
+
+  assert(upper->contains(to-1) && "LiveRangeIdem is not entirely in interval!");
+
+  if (upper->start == from) {
+    if (upper->end == to) {
+      eraseRange(upper);
+    }
+    else
+      upper->start = to;
+    return;
+  }
+
+  if (upper->end == to) {
+    upper->end = from;
+    return;
+  }
+
+  unsigned oldEnd = upper->end;
+  upper->end = from;
+
+  LiveRangeIdem *pos = *(++upper);
+
+  insertRangeBefore(to, oldEnd, pos);
 }
 
 char LiveIntervalAnalysisIdem::ID = 0;
@@ -435,14 +485,19 @@ void LiveIntervalAnalysisIdem::dump(std::vector<MachineBasicBlock *> &sequence) 
   auto li = interval_begin();
   auto end = interval_end();
   for (; li != end; ++li) {
-    li->second->dump(*const_cast<TargetRegisterInfo*>(mf->getTarget().getRegisterInfo()));
+    li->second->dump(mf->getTarget().getRegisterInfo());
     llvm::errs()<<"\n";
   }
 }
 
 void LiveIntervalAnalysisIdem::removeInterval(LiveIntervalIdem *pIdem) {
   for (auto itr = interval_begin(), end = interval_end(); itr != end; ++itr) {
-    if (itr->second == pIdem)
-      intervals.erase(itr);
+    if (itr->first == pIdem->reg) {
+      for (auto r = pIdem->begin(), e = pIdem->end(); r != e; ++r)
+        itr->second->removeRange(r->start, r->end);
+
+      if (itr->second->empty())
+        intervals.erase(itr);
+    }
   }
 }

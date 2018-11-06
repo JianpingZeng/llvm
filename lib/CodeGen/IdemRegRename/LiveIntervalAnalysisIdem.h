@@ -30,10 +30,21 @@ public:
   unsigned start;
   unsigned end;
   LiveRangeIdem *next;
+  LiveRangeIdem *prev;
 
 public:
-  LiveRangeIdem(unsigned _defIdx, unsigned _killIdx, LiveRangeIdem * _next) :
-      start(_defIdx), end(_killIdx), next(_next) {}
+  LiveRangeIdem(unsigned _defIdx, unsigned _killIdx, LiveRangeIdem * _next, LiveRangeIdem *_prev) :
+      start(_defIdx), end(_killIdx), next(_next), prev(_prev) {
+    if (next) {
+      next->prev = this;
+    }
+    if (prev) {
+      prev->next = this;
+    }
+  }
+
+  LiveRangeIdem() = default;
+
   bool contains(unsigned idx) {
     return start <= idx && idx <= end;
   }
@@ -89,6 +100,23 @@ public:
     ++res;
     return res;
   }
+  RangeIterator operator--(int) {
+    RangeIterator res = *this;
+    --res;
+    return res;
+  }
+
+  RangeIterator operator--() {
+    cur = cur->prev;
+    return *this;
+  }
+
+  LiveRangeIdem* operator *() {
+    return cur;
+  }
+
+  operator LiveRangeIdem*() { return cur; }
+
   bool operator ==(RangeIterator itr) {
     return cur == itr.cur;
   }
@@ -125,8 +153,8 @@ public:
     usePoints.insert(UsePoint(numMI, MO));
   }
 
-  void print(llvm::raw_ostream &OS, const TargetRegisterInfo &tri);
-  void dump(TargetRegisterInfo &TRI) { print(llvm::errs(), TRI); }
+  void print(llvm::raw_ostream &OS, const TargetRegisterInfo *tri);
+  void dump(const TargetRegisterInfo *TRI = nullptr) { print(llvm::errs(), TRI); }
   bool isExpiredAt(unsigned pos) { return getLast()->end <= pos; }
   bool isLiveAt(unsigned pos);
   unsigned beginNumber() { return first->start; }
@@ -164,6 +192,29 @@ public:
   RangeIterator end() { return RangeIterator(); }
   const RangeIterator begin() const { return RangeIterator(first); }
   const RangeIterator end() const { return RangeIterator(); }
+  void removeRange(unsigned from, unsigned to);
+  RangeIterator upperBound(RangeIterator begin, RangeIterator end, unsigned key);
+  void eraseRange(LiveRangeIdem *range) {
+    if (!range) return;
+
+    if (range->next != nullptr)
+      range->next->prev = range->prev;
+    if (range->prev != nullptr)
+      range->prev->next = range->next;
+
+    if (first == range)
+      first = range->next;
+    if (last == range)
+      last = range->next;
+
+    for (auto itr = usePoints.begin(), end = usePoints.end(); itr != end; ++itr) {
+      UsePoint up = *itr;
+      /*if (up.id >= range->start && up.id < range->end)
+        usePoints.erase(itr);*/
+    }
+
+    delete range;
+  }
 };
 
 class LiveIntervalAnalysisIdem : public MachineFunctionPass {
