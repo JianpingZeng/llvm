@@ -38,7 +38,7 @@ static cl::opt<bool> EnableIdemTimeStatistic("idem-time-statistic",
                                              cl::desc("Enable time statistic in idem renaming"),
                                              cl::Hidden);
 static cl::opt<unsigned> SpilledIntervalThreshold("spilled-interval-threshold",
-                                                  cl::init(20),
+                                                  cl::init(30),
                                                   cl::desc("The threshold of number of spilled intervals "
                                                            "when considering spilling other interval or "
                                                            "current interval"),
@@ -930,10 +930,7 @@ void IdemRegisterRenamer::processHandledIntervals(std::vector<LiveIntervalIdem *
 }
 
 bool IdemRegisterRenamer::numberOfSubLiveIntervalLessThanThreshold(LiveIntervalIdem *interval) {
-  long res =  0;
-  for(auto itr = interval->usepoint_begin(), end = interval->usepoint_end(); itr != end; ++itr)
-    ++res;
-
+  long res =  std::distance(interval->usepoint_begin(), interval->usepoint_end());
   return res < SpilledIntervalThreshold;
 }
 
@@ -1544,6 +1541,9 @@ bool IdemRegisterRenamer::handleAntiDependences() {
             std::swap(from, to);
 
           LiveIntervalIdem *itrv = new LiveIntervalIdem;
+          if (from > to)
+            std::swap(from, to);
+
           itrv->addRange(from, to);
           std::for_each(begin, pos, [&](MIOp &op) {
             itrv->addUsePoint(li->getIndex(op.mi), &op.mi->getOperand(op.index));
