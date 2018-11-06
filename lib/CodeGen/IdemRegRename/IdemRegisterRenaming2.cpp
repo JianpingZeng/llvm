@@ -726,12 +726,14 @@ bool IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
 
   // We need to assign the same register to the use point in the two address instruction.
   std::vector<LiveIntervalIdem *> buf;
+  std::set<std::pair<MachineInstr *, unsigned>> twoAddrInstrs;
+
   for (auto begin = interval->usepoint_begin(),
            end = interval->usepoint_end(); begin != end; ++begin) {
-    /*if (isTwoAddressInstr(begin->mo->getParent(), interval->reg)) {
+    if (isTwoAddressInstr(begin->mo->getParent(), interval->reg)) {
       twoAddrInstrs.insert(std::make_pair(begin->mo->getParent(), begin->id));
     }
-    else*/ {
+    else {
       LiveIntervalIdem *verifyLI = new LiveIntervalIdem;
       verifyLI->addUsePoint(begin->id, begin->mo);
       unsigned from, to;
@@ -757,10 +759,8 @@ bool IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
 
   // Delete the targetInter from LiveIntervalAnalysisIdem
   li->removeInterval(interval);
-  spilledItrs.insert(spilledItrs.end(), buf.begin(), buf.end());
-  return true;
 
-  /*for (std::pair<MachineInstr*, unsigned > pair : twoAddrInstrs) {
+  for (std::pair<MachineInstr*, unsigned > pair : twoAddrInstrs) {
     MachineInstr *mi = pair.first;
     unsigned index = pair.second;
     unsigned from, to;
@@ -768,26 +768,23 @@ bool IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
     to = from + 4;
     LiveIntervalIdem *verifyLI = new LiveIntervalIdem;
     for (unsigned i = 0, e = mi->getNumOperands(); i < e; i++) {
-      auto mo = mi->getOperand(i);
+      MachineOperand& mo = mi->getOperand(i);
       if (mo.isReg() && mo.getReg() == interval->reg) {
         verifyLI->addUsePoint(index, &mo);
-
-        for (auto itr = verifyLI->usepoint_begin(), end = verifyLI->usepoint_end(); itr != end; ++itr)
-          assert(itr->mo->isReg());
       }
     }
 
-    if (from == 22 && to == 26) {
-      llvm::errs()<<(void*)verifyLI<<"\n";
-      for (auto itr = verifyLI->usepoint_begin(), end = verifyLI->usepoint_end(); itr != end; ++itr)
-        assert(itr->mo->isReg());
-    }
+    for (auto itr = verifyLI->usepoint_begin(), end = verifyLI->usepoint_end(); itr != end; ++itr)
+      assert(itr->mo->isReg());
 
     verifyLI->addRange(from, to);
     verifyLI->reg = interval->reg;
     verifyLI->costToSpill = UINT32_MAX;
-    spilledItrs.push_back(verifyLI);
-  }*/
+    buf.push_back(verifyLI);
+  }
+
+  spilledItrs.insert(spilledItrs.end(), buf.begin(), buf.end());
+  return true;
 }
 
 void IdemRegisterRenamer::getAllocableRegs(unsigned useReg, std::set<unsigned> &allocables) {
@@ -980,14 +977,15 @@ void IdemRegisterRenamer::revisitSpilledInterval(std::set<unsigned> &allocables,
   std::vector<LiveIntervalIdem *> handled;
   regUse.resize(tri->getNumRegs(), 0);
 
-  for (auto begin = li->interval_begin(), end = li->interval_end(); begin != end; ++begin) {
-    handled.push_back(begin->second);
-    regUse[begin->second->reg] = 1;
-  }
+  std::for_each(li->interval_begin(), li->interval_end(), [&](std::pair<unsigned, LiveIntervalIdem*> itr) {
+    handled.push_back(itr.second);
+    regUse[itr.second->reg] = 1;
+  });
 
-  for (auto begin = spilled.begin(), end = spilled.end(); begin != end; ++begin) {
-    unhandled.push(*begin);
-  }
+  std::for_each(spilled.begin(), spilled.end(), [&](LiveIntervalIdem *pIdem) {
+    unhandled.push(pIdem);
+  });
+
   getOrGroupId(spilled);
 
   while (!unhandled.empty()) {
@@ -1003,8 +1001,9 @@ void IdemRegisterRenamer::revisitSpilledInterval(std::set<unsigned> &allocables,
     std::vector<LiveIntervalIdem *> localSpilled;
     assignRegOrStackSlotAtInterval(allocables, cur, handled, localSpilled);
     getOrGroupId(localSpilled);
-    for (auto &spill : localSpilled)
-      unhandled.push(spill);
+    std::for_each(localSpilled.begin(), localSpilled.end(), [&](LiveIntervalIdem *idem) {
+      unhandled.push(idem);
+    });
 
     // Insert spilling code for spilled live interval
     insertSpillingCodeForInterval(cur);
@@ -1429,6 +1428,8 @@ void IdemRegisterRenamer::countRegistersRaiseAntiDep(MachineBasicBlock::iterator
   }
 }
 
+int m = 0;
+
 bool IdemRegisterRenamer::handleAntiDependences() {
   if (antiDeps.empty())
     return false;
@@ -1441,8 +1442,9 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       t.startTimer();
     }
 
-    /*dbgs()<<antiDeps.size()<<"\n";
+    /*dbgs()<<m<<"\n";
     mf->dump();*/
+    ++m;
 
     auto pair = antiDeps.front();
     antiDeps.erase(antiDeps.begin());
