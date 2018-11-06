@@ -139,9 +139,16 @@ public:
    */
   unsigned costToSpill;
 
+  /**
+   * This flag is about to be used in IdemRegisterRenamer to check if
+   * we should consider the anti-dependence caused by newly assigned register.
+   */
+  bool fromLoad : 1;
+
   LiveIntervalIdem() : reg(0), first(nullptr),
                        last(nullptr),
-                       usePoints(), costToSpill(0) {}
+                       usePoints(), costToSpill(0),
+                       fromLoad(false) {}
   ~LiveIntervalIdem();
 
   UsePointSet &getUsePoint() { return usePoints; }

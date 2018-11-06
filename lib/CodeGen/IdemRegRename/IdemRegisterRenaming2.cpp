@@ -187,14 +187,13 @@ private:
                                  std::vector<LiveIntervalIdem *> &spilledItrs);
   void getAllocableRegs(unsigned useReg, std::set<unsigned> &allocables);
 
-  void revisitSpilledInterval(std::set<unsigned> &allocables, std::vector<LiveIntervalIdem *> &spilled);
+  void revisitSpilledInterval(std::vector<LiveIntervalIdem *> &spilled);
 
   void processHandledIntervals(std::vector<LiveIntervalIdem *> &handled,
                                unsigned currentStart);
   void insertSpillingCodeForInterval(LiveIntervalIdem *spilledItr);
 
-  void assignRegOrStackSlotAtInterval(std::set<unsigned> &allocables,
-                                      LiveIntervalIdem *interval,
+  void assignRegOrStackSlotAtInterval(LiveIntervalIdem *interval,
                                       std::vector<LiveIntervalIdem *> &handled,
                                       std::vector<LiveIntervalIdem *> &spilled);
 
@@ -240,27 +239,40 @@ private:
                                   unsigned useReg,
                                   bool &seenRedef);
 
-  bool partialEquals(unsigned reg1, unsigned reg2) {
-    assert(TargetRegisterInfo::isPhysicalRegister(reg1) &&
-        TargetRegisterInfo::isPhysicalRegister(reg2));
-
-    if (reg1 == reg2)
-      return true;
-    for (const unsigned *r = tri->getSubRegisters(reg1); *r; ++r)
-      if (*r == reg2)
-        return true;
-
-    for (const unsigned *r = tri->getSubRegisters(reg2); *r; ++r)
-      if (*r == reg1)
-        return true;
-
-    return false;
-  }
-
   void countRegistersRaiseAntiDep(MachineBasicBlock::iterator begin,
                                   MachineBasicBlock::iterator end,
                                   MachineBasicBlock *mbb,
                                   DenseSet<unsigned> &unallocableRegs);
+
+  /**
+   * This function differs from {@code countRegisterRaiseAntiDep} in the aspect of
+   * this function is about to check whether the introduced defined register will
+   * raise a new anti-dependence.
+   * @param mi
+   * @param unallocableRegs
+   */
+  void countDefRegRaiseAntiDep(MachineInstr *mi, DenseSet<unsigned> &unallocableRegs) {
+    if (!mi) return;
+
+    MachineBasicBlock *mbb = mi->getParent();
+    auto begin = MachineBasicBlock::reverse_iterator(mi);
+    auto end = mbb->rend();
+
+    for (; begin != end; ++begin) {
+      if (tii->isIdemBoundary(&*begin))
+        break;
+    }
+    // idem exists.
+    if (begin != end) {
+      auto &buf = gather->getIdemLiveIns(&*begin);
+      unallocableRegs.insert(buf.begin(), buf.end());
+    }
+    else {
+      // no idem
+      for (auto itr = mbb->livein_begin(), end = mbb->livein_end(); itr != end; ++itr)
+        unallocableRegs.insert(*itr);
+    }
+  }
 
   void countRegisterRaiseAntiDepsInLoop(const MachineBasicBlock::iterator &idem,
                                         const MachineBasicBlock::iterator &end,
@@ -740,10 +752,14 @@ bool IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
       if (begin->mo->isUse()) {
         to = li->mi2Idx[begin->mo->getParent()];
         from = to - 1;
+        verifyLI->fromLoad = true;
       } else {
         from = li->mi2Idx[begin->mo->getParent()];
         to = from + 1;
+        // Doesn't need assignment
+        // verifyLI->fromLoad = false;
       }
+
       verifyLI->addRange(from, to);
 
       // Keep the old register for choosing an appropriate register class when performing spilling
@@ -754,8 +770,8 @@ bool IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
     }
   }
 
-  if (buf.size() > SpilledIntervalThreshold)
-    return false;
+  /*if (buf.size() > SpilledIntervalThreshold)
+    return false;*/
 
   // Delete the targetInter from LiveIntervalAnalysisIdem
   li->removeInterval(interval);
@@ -780,6 +796,7 @@ bool IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
     verifyLI->addRange(from, to);
     verifyLI->reg = interval->reg;
     verifyLI->costToSpill = UINT32_MAX;
+    verifyLI->fromLoad = true;
     buf.push_back(verifyLI);
   }
 
@@ -934,23 +951,52 @@ bool IdemRegisterRenamer::numberOfSubLiveIntervalLessThanThreshold(LiveIntervalI
   return res < SpilledIntervalThreshold;
 }
 
-void IdemRegisterRenamer::assignRegOrStackSlotAtInterval(std::set<unsigned> &allocables,
-                                                         LiveIntervalIdem *interval,
+void IdemRegisterRenamer::assignRegOrStackSlotAtInterval(LiveIntervalIdem *interval,
                                                          std::vector<LiveIntervalIdem *> &handled,
                                                          std::vector<LiveIntervalIdem *> &spilled) {
   unsigned freeReg = 0;
-  for (unsigned reg : allocables) {
-    if (!regUse[reg]) {
-      freeReg = reg;
-      break;
+  std::set<unsigned> allocables;
+  getAllocableRegs(interval->reg, allocables);
+
+  DenseSet<unsigned> unallocableRegs;
+  addRegisterWithSubregs(unallocableRegs, interval->reg);
+  addRegisterWithSuperRegs(unallocableRegs, interval->reg);
+  for (unsigned r : regUse) {
+    if (regUse[r]) {
+      addRegisterWithSubregs(unallocableRegs, r);
+      addRegisterWithSuperRegs(unallocableRegs, r);
     }
   }
+
+  for (int r = reservedRegs.find_first(); r != -1; r = reservedRegs.find_next(r)) {
+    addRegisterWithSuperRegs(unallocableRegs, r);
+    addRegisterWithSubregs(unallocableRegs, r);
+  }
+
+  if (interval->fromLoad) {
+    // remove those registers which will cause anti-dependence after renaming
+    MachineInstr *mi = interval->usepoint_begin()->mo->getParent();
+    countDefRegRaiseAntiDep(mi, unallocableRegs);
+  }
+
+  for (auto r : unallocableRegs)
+    if (allocables.count(r))
+      allocables.erase(r);
+
+  auto temp = allocables;
+  set_intersect(temp, unallocableRegs);
+  set_subtract(allocables, temp);
+
+  if (!allocables.empty())
+     freeReg = *allocables.begin();
+
   if (freeReg == 0) {
     // select a handled interval to be spilled out into memory.
     std::vector<LiveIntervalIdem*>::iterator spilledItr = handled.end();
     for (auto itr = handled.begin(), end = handled.end(); itr != end; ++itr) {
       if ((legalToReplace((*itr)->reg, interval->reg) &&
-          numberOfSubLiveIntervalLessThanThreshold(*itr)) &&
+          !unallocableRegs.count((*itr)->reg) /*&&
+          numberOfSubLiveIntervalLessThanThreshold(*itr)*/) &&
           (spilledItr == end || ((*itr)->costToSpill < (*spilledItr)->costToSpill)))
         spilledItr = itr;
     }
@@ -968,8 +1014,7 @@ void IdemRegisterRenamer::assignRegOrStackSlotAtInterval(std::set<unsigned> &all
   li->insertOrCreateInterval(freeReg, interval);
 }
 
-void IdemRegisterRenamer::revisitSpilledInterval(std::set<unsigned> &allocables,
-                                                 std::vector<LiveIntervalIdem *> &spilled) {
+void IdemRegisterRenamer::revisitSpilledInterval(std::vector<LiveIntervalIdem *> &spilled) {
   IntervalMap unhandled;
   std::vector<LiveIntervalIdem *> handled;
   regUse.resize(tri->getNumRegs(), 0);
@@ -996,7 +1041,7 @@ void IdemRegisterRenamer::revisitSpilledInterval(std::set<unsigned> &allocables,
     // Note that, only register is allowed to assigned to current interval.
     // Because the current interval corresponds to spilling code.
     std::vector<LiveIntervalIdem *> localSpilled;
-    assignRegOrStackSlotAtInterval(allocables, cur, handled, localSpilled);
+    assignRegOrStackSlotAtInterval(cur, handled, localSpilled);
     getOrGroupId(localSpilled);
     std::for_each(localSpilled.begin(), localSpilled.end(), [&](LiveIntervalIdem *idem) {
       unhandled.push(idem);
@@ -1048,11 +1093,9 @@ unsigned IdemRegisterRenamer::tryChooseBlockedRegister(LiveIntervalIdem &interva
   if (!getSpilledSubLiveInterval(targetInter, spilledIntervs))
     return 0;
 
-  if (!spilledIntervs.empty()) {
-    std::set<unsigned> allocables;
-    getAllocableRegs(targetInter->reg, allocables);
-    revisitSpilledInterval(allocables, spilledIntervs);
-  }
+  if (!spilledIntervs.empty())
+    revisitSpilledInterval(spilledIntervs);
+
   return targetInter->reg;
 }
 
