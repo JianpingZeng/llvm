@@ -127,6 +127,8 @@ public:
   }
 };
 
+class LiveIntervalAnalysisIdem;
+
 class LiveIntervalIdem {
 public:
   unsigned reg;
@@ -182,6 +184,7 @@ public:
 
   bool empty() { return begin() == end(); }
 
+  void split(LiveIntervalAnalysisIdem *li, MachineInstr *useMI, MachineInstr *copyMI, unsigned newReg);
 private:
   /**
    * Insert live range before the current range. It will merge range to be inserted with
@@ -214,14 +217,17 @@ public:
     if (last == range)
       last = range->next;
 
-    for (auto itr = usePoints.begin(), end = usePoints.end(); itr != end; ++itr) {
+    for (auto itr = usePoints.begin(), end = usePoints.end(); itr != end; ) {
       UsePoint up = *itr;
-      /*if (up.id >= range->start && up.id < range->end)
-        usePoints.erase(itr);*/
+      if (up.id >= range->start && up.id < range->end)
+        itr = usePoints.erase(itr);
+      else
+        ++itr;
     }
 
     delete range;
   }
+  void resetStart(unsigned int usePos, unsigned int newStart);
 };
 
 class LiveIntervalAnalysisIdem : public MachineFunctionPass {
@@ -334,6 +340,19 @@ public:
 
   void dump();
   void removeInterval(LiveIntervalIdem *pIdem);
+  /**
+   * Update the live interval of the specified reg used at the position specified
+   * by usePos with the new start index.
+   * @param oldReg
+   * @param usePos
+   * @param useMI
+   * @param copyMI
+   */
+  void resetLiveIntervalStart(unsigned oldReg,
+                              unsigned usePos,
+                              MachineOperand *mo);
+
+  void buildIntervalForRegister(unsigned reg, MachineOperand *mo);
 };
 }
 

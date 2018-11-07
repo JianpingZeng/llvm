@@ -161,10 +161,80 @@ void LiveIntervalIdem::removeRange(unsigned from, unsigned to) {
 
   unsigned oldEnd = upper->end;
   upper->end = from;
-
   LiveRangeIdem *pos = *(++upper);
-
   insertRangeBefore(to, oldEnd, pos);
+}
+
+void LiveIntervalIdem::resetStart(unsigned int usePos, unsigned int newStart) {
+  if (usePos < beginNumber() || usePos >= endNumber())
+    return;
+
+  RangeIterator cur = upperBound(begin(), end(), usePos);
+  --cur;
+  assert(cur != end() && cur->contains(usePos) &&
+      "The use position is not within live range!");
+  // Reset the start position of the specified live range
+  if (cur->start < newStart) {
+    // remove some use point
+    for (auto itr = usepoint_begin(), end = usepoint_end(); itr != end; ++itr) {
+      if (itr->id >= cur->start && itr->id < newStart)
+        usePoints.erase(itr);
+    }
+    cur->start = newStart;
+  }
+}
+
+void LiveIntervalIdem::split(LiveIntervalAnalysisIdem *li,
+                             MachineInstr *useMI,
+                             MachineInstr *copyMI,
+                             unsigned newReg) {
+  unsigned useIndex = li->getIndex(useMI);
+  unsigned copyIndex = li->getIndex(copyMI);
+  LiveIntervalIdem *newInterval = new LiveIntervalIdem;
+  newInterval->reg = newReg;
+  RangeIterator cur = upperBound(begin(), end(), useIndex);
+  if (cur == end())
+    cur = RangeIterator(last);
+  else
+    --cur;
+  assert(cur != end());
+
+  if (copyIndex > cur->end)
+    std::swap(copyIndex, cur->end);
+
+  newInterval->addRange(copyIndex, cur->end);
+  newInterval->addUsePoint(copyIndex, &copyMI->getOperand(0));
+
+  addUsePoint(copyIndex, &copyMI->getOperand(1));
+  for (auto itr = usepoint_begin(), end = usepoint_end(); itr != end; ) {
+    if (itr->id >= cur->start && itr->id < cur->end) {
+      newInterval->addUsePoint(itr->id, itr->mo);
+      itr = usePoints.erase(itr);
+    }
+    else
+      ++itr;
+  }
+  cur->end = copyIndex + 1;
+  RangeIterator begin = cur;
+
+  cur->next = nullptr;
+  last = cur;
+
+  ++begin;
+  newInterval->first->next = begin;
+  if (begin)
+    begin->prev = newInterval->first;
+
+  newInterval->last = begin;
+  for (; begin != end(); ++begin) {
+    for (auto itr = usepoint_begin(), end = usepoint_end(); itr != end; ++itr) {
+      if (itr->id >= begin->start && itr->id < begin->end) {
+        newInterval->addUsePoint(itr->id, itr->mo);
+        usePoints.erase(itr);
+      }
+    }
+    newInterval->last = begin;
+  }
 }
 
 char LiveIntervalAnalysisIdem::ID = 0;
@@ -474,5 +544,82 @@ void LiveIntervalAnalysisIdem::removeInterval(LiveIntervalIdem *pIdem) {
       if (itr->second->empty())
         intervals.erase(itr);
     }
+  }
+}
+
+void LiveIntervalAnalysisIdem::resetLiveIntervalStart(unsigned int oldReg,
+                                                      unsigned int usePos,
+                                                      MachineOperand *mo) {
+  // If there is no live interval associated with the specified oldReg,
+  // terminates immediately.
+  if (!intervals[oldReg]) return;
+
+  LiveIntervalIdem *interval = intervals[oldReg];
+  unsigned newStart = getIndex(mo->getParent());
+  interval->resetStart(usePos, newStart);
+  interval->addUsePoint(newStart, mo);
+}
+
+void LiveIntervalAnalysisIdem::buildIntervalForRegister(unsigned reg,
+                                                        MachineOperand *mo) {
+  assert(TargetRegisterInfo::isPhysicalRegister(reg));
+  LiveIntervalIdem *&interval = intervals[reg];
+  if (!interval) {
+    interval = new LiveIntervalIdem;
+    interval->reg = reg;
+  }
+  MachineBasicBlock *mbb = mo->getParent()->getParent();
+  unsigned blockBegin = getIndex(&mbb->front());
+  unsigned to = getIndex(mo->getParent()) + 1;
+  interval->addRange(blockBegin, to);
+  interval->addUsePoint(to-1, mo);
+
+  // Add Live Range for each MBB whose live out set contains the reg
+  std::vector<MachineBasicBlock*> worklist;
+  std::set<MachineBasicBlock*> visited;
+  worklist.push_back(mbb);
+  while (!worklist.empty()) {
+    auto cur = worklist.back();
+    worklist.pop_back();
+    visited.insert(cur);
+
+    bool shouldForward = true;
+    MachineInstr *def = 0;
+    MachineOperand *defMO = 0;
+    for (auto itr = cur->rbegin(), end = cur->rend(); itr != end && shouldForward; ++itr) {
+      for (unsigned i = 0, e = itr->getNumOperands(); i < e; i++) {
+        auto &mo = itr->getOperand(i);
+        if (mo.isReg() && mo.getReg() && mo.getReg() == reg) {
+          shouldForward = false;
+          def = &*itr;
+          defMO = &mo;
+          break;
+        }
+      }
+    }
+    if (shouldForward) {
+      interval->addRange(getIndex(&cur->front()), getIndex(&cur->back()) + 1);
+      std::vector<MachineBasicBlock*> buf;
+      buf.assign(cur->pred_begin(), cur->pred_end());
+      std::for_each(buf.rbegin(), buf.rend(), [&](MachineBasicBlock *pred) {
+        if (!visited.count(pred))
+          worklist.push_back(pred);
+      });
+    }
+    else {
+      interval->addRange(getIndex(def), getIndex(&cur->back()) + 1);
+      interval->addUsePoint(getIndex(def), defMO);
+    }
+  }
+
+  // Weight cost of the live interval to spill
+  // Weight each use point by it's loop nesting deepth.
+  unsigned &cost = interval->costToSpill;
+  for (auto &up : interval->usePoints) {
+    MachineBasicBlock *mbb = up.mo->getParent()->getParent();
+    if (MachineLoop *ml = loopInfo->getLoopFor(mbb)) {
+      cost += 10 * ml->getLoopDepth();
+    } else
+      cost += 1;
   }
 }

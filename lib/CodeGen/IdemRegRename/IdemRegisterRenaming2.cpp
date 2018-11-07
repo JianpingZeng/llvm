@@ -2150,7 +2150,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         // We must insert move firstly, and than substitute the old reg with new reg.
         tii->copyPhysReg(*mbb, useMI, DebugLoc(), phyReg,  oldReg, useMI->getOperand(moIndex).isKill());
         auto copy = getPrevMI(useMI);
-        li->mi2Idx[copy] = li->getIndex(useMI) - 1;
+        li->mi2Idx[copy] = li->getIndex(useMI) - 2;
 
         for (unsigned k = 0, e = useMI->getNumOperands(); k < e; k++) {
           MachineOperand& mo = useMI->getOperand(k);
@@ -2159,8 +2159,9 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         }
 
         // Update the internal data structure of LiveIntervalAnalyisIdem
-        // li->removeInterval(interval);
-        li->insertOrCreateInterval(phyReg, interval);
+        LiveIntervalIdem *oldInterval = li->intervals[oldReg];
+        assert(oldInterval);
+        oldInterval->split(li, useMI, copy, phyReg);
       }
       else {
 
@@ -2170,7 +2171,9 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         // We must insert move firstly, and than substitute the old reg with new reg.
         tii->copyPhysReg(*mbb, useMI, DebugLoc(), oldReg, phyReg, true);
         auto copy = getPrevMI(useMI);
-        li->mi2Idx[copy] = li->getIndex(useMI) - 1;
+        unsigned newStart = li->mi2Idx[copy] = li->getIndex(useMI) - 2;
+        li->resetLiveIntervalStart(oldReg, newStart - 2, &copy->getOperand(0));
+        li->buildIntervalForRegister(phyReg, &copy->getOperand(1));
       }
     }
 
@@ -2214,7 +2217,6 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   mri = &MF.getRegInfo();
   mfi = MF.getFrameInfo();
   reservedRegs = tri->getReservedRegs(*mf);
-  li->dump();
 
   // Collects anti-dependences operand pair.
   /*llvm::errs() << "Before renaming2: \n";
