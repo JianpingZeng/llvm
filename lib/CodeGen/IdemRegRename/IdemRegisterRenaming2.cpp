@@ -1482,8 +1482,8 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       t.startTimer();
     }
 
-    /*dbgs()<<m<<"\n";
-    mf->dump();*/
+    // dbgs()<<m<<"\n";
+    // mf->dump();
     ++m;
 
     auto pair = antiDeps.front();
@@ -2159,6 +2159,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         }
 
         // Update the internal data structure of LiveIntervalAnalyisIdem
+        // li->removeInterval(interval);
         li->insertOrCreateInterval(phyReg, interval);
       }
       else {
@@ -2213,6 +2214,7 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   mri = &MF.getRegInfo();
   mfi = MF.getFrameInfo();
   reservedRegs = tri->getReservedRegs(*mf);
+  li->dump();
 
   // Collects anti-dependences operand pair.
   /*llvm::errs() << "Before renaming2: \n";

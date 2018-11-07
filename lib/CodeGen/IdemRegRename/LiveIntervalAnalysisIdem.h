@@ -260,16 +260,23 @@ public:
     loopInfo = nullptr;
   }
 private:
-  void computeLocalLiveSet(std::vector<MachineBasicBlock *> &sequence,
-                           std::vector<std::set<unsigned> > &liveGen,
-                           std::vector<std::set<unsigned> > liveKill);
+  void addRegisterWithSubregs(std::set<unsigned> &set, unsigned reg) {
+    set.insert(reg);
+    if (!TargetRegisterInfo::isStackSlot(reg) &&
+        TargetRegisterInfo::isPhysicalRegister(reg)) {
+      for (const unsigned *r = tri->getSubRegisters(reg); *r; ++r)
+        set.insert(*r);
+    }
+  }
+
+  void computeLocalLiveSet(std::vector<std::set<unsigned> > &liveGens,
+                           std::vector<std::set<unsigned> > &liveKills);
 
   void numberMachineInstr(std::vector<MachineBasicBlock*> &sequence);
-  void computeGlobalLiveSet(std::vector<MachineBasicBlock*> &sequence,
-                            std::vector<std::set<unsigned> > &liveIns,
+  void computeGlobalLiveSet(std::vector<std::set<unsigned> > &liveIns,
                             std::vector<std::set<unsigned> > &liveOuts,
-                            std::vector<std::set<unsigned> > &liveGen,
-                            std::vector<std::set<unsigned> > &liveKill);
+                            std::vector<std::set<unsigned> > &liveGens,
+                            std::vector<std::set<unsigned> > &liveKills);
   void handleRegisterDef(unsigned reg, MachineOperand *mo, unsigned start, unsigned end);
   void buildIntervals(std::vector<MachineBasicBlock*> &sequence,
                       std::vector<std::set<unsigned> > &liveOuts);
@@ -325,7 +332,7 @@ public:
   }
   void insertOrCreateInterval(unsigned int reg, LiveIntervalIdem *pIdem);
 
-  void dump(std::vector<MachineBasicBlock *> &sequence);
+  void dump();
   void removeInterval(LiveIntervalIdem *pIdem);
 };
 }

@@ -213,7 +213,7 @@ private:
                    ", " << tri->getName(def->getReg()) << "]\n";
     }
 
-    li->dump(sequence);
+    li->dump();
   }
 
   /**
