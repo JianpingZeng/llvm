@@ -1354,7 +1354,7 @@ static void dumpWrittenAndExposedVars(const MachineBasicBlock &MBB,
   dbgs() << "]\n";
 }
 
-static void printLiveIns(DenseSet<unsigned> &sets, const TargetRegisterInfo *tri) {
+LLVM_ATTRIBUTE_UNUSED static void printLiveIns(DenseSet<unsigned> &sets, const TargetRegisterInfo *tri) {
   llvm::errs()<<"LiveIns: [";
   for (auto &r : sets)
     llvm::errs()<<PrintReg(r, tri)<<",";
@@ -1393,16 +1393,6 @@ void MachineVerifier::verifyIdempotentRegions() {
     set_union(LiveIns, MInfo.vregsRequired);
     DEBUG(dumpLiveIns(*Region, LiveIns, Indexes, TRI));
 
-/*    if (Entry->getParent()->getName() == "if.then") {
-      llvm::errs() << " with live-ins: [";
-      for (DenseSet<unsigned>::iterator I = LiveIns.begin(),
-               IE = LiveIns.end(), First = I; I != IE; ++I) {
-        if (I != First)
-          llvm::errs() << ", ";
-        llvm::errs() << PrintReg(*I, TRI);
-      }
-      llvm::errs()<<"]\n";
-    }*/
     // The case with variable control is trivial; the registers that must not
     // be clobbered are simply the registers live at the region's entry point.
     if (IdempotencePreservationMode == IdempotenceOptions::VariableCF) {

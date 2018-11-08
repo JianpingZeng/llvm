@@ -272,28 +272,47 @@ private:
   void countDefRegRaiseAntiDep(MachineInstr *mi, DenseSet<unsigned> &unallocableRegs) {
     if (!mi) return;
 
-    MachineBasicBlock *mbb = mi->getParent();
-    auto begin = MachineBasicBlock::reverse_iterator(mi);
-    auto end = mbb->rend();
+    typedef MachineBasicBlock::reverse_iterator Itr;
+    struct WorkItem {
+      Itr begin, end;
+      MachineBasicBlock *mbb;
+      WorkItem(Itr _begin, Itr _end, MachineBasicBlock *_mbb) :
+          begin(_begin), end(_end), mbb(_mbb) {}
+    };
 
-    for (; begin != end; ++begin) {
-      if (tii->isIdemBoundary(&*begin))
-        break;
-    }
-    // idem exists.
-    if (begin != end) {
-      auto &buf = gather->getIdemLiveIns(&*begin);
-      std::for_each(buf.begin(), buf.end(), [&](unsigned r) {
-        addRegisterWithSubregs(unallocableRegs, r);
-        addRegisterWithSuperRegs(unallocableRegs, r);
-      });
-    }
-    else {
-      // no idem
-      std::for_each(mbb->livein_begin(), mbb->livein_end(), [&](unsigned r) {
-        addRegisterWithSubregs(unallocableRegs, r);
-        addRegisterWithSuperRegs(unallocableRegs, r);
-      });
+    std::vector<WorkItem> worklist;
+    std::set<MachineBasicBlock*> visited;
+    MachineBasicBlock *mbb = mi->getParent();
+    worklist.emplace_back(Itr(mi), mbb->rend(), mbb);
+
+    while (!worklist.empty()) {
+      auto cur = worklist.back();
+      worklist.pop_back();
+      mbb = cur.mbb;
+      visited.insert(mbb);
+
+      auto begin = cur.begin;
+      auto end = cur.end;
+      for (; begin != end; ++begin) {
+        if (tii->isIdemBoundary(&*begin))
+          break;
+      }
+      // idem exists.
+      if (begin != end) {
+        auto &buf = gather->getIdemLiveIns(&*begin);
+        std::for_each(buf.begin(), buf.end(), [&](unsigned r) {
+          addRegisterWithSubregs(unallocableRegs, r);
+          addRegisterWithSuperRegs(unallocableRegs, r);
+        });
+      }
+      else {
+        std::vector<MachineBasicBlock*> buf;
+        buf.assign(mbb->pred_begin(), mbb->pred_end());
+        std::for_each(buf.rbegin(), buf.rend(), [&](MachineBasicBlock *pred) {
+          if (!visited.count(pred))
+            worklist.emplace_back(pred->rbegin(), pred->rend(), pred);
+        });
+      }
     }
   }
 
@@ -783,7 +802,7 @@ bool IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
       if (begin->mo->isUse()) {
         to = li->mi2Idx[begin->mo->getParent()];
         from = to - 1;
-        verifyLI->fromLoad = true;
+        // verifyLI->fromLoad = true;
       } else {
         from = li->mi2Idx[begin->mo->getParent()];
         to = from + 1;
@@ -827,7 +846,7 @@ bool IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
     verifyLI->addRange(from, to);
     verifyLI->reg = interval->reg;
     verifyLI->costToSpill = UINT32_MAX;
-    verifyLI->fromLoad = true;
+    // verifyLI->fromLoad = true;
     buf.push_back(verifyLI);
   }
 
@@ -1004,11 +1023,9 @@ void IdemRegisterRenamer::assignRegOrStackSlotAtInterval(LiveIntervalIdem *inter
     addRegisterWithSubregs(unallocableRegs, r);
   }
 
-  if (interval->fromLoad) {
-    // remove those registers which will cause anti-dependence after renaming
-    MachineInstr *mi = interval->usepoint_begin()->mo->getParent();
-    countDefRegRaiseAntiDep(mi, unallocableRegs);
-  }
+  // remove those registers which will cause anti-dependence after renaming
+  MachineInstr *mi = interval->usepoint_begin()->mo->getParent();
+  countDefRegRaiseAntiDep(mi, unallocableRegs);
 
   for (auto r : unallocableRegs)
     if (allocables.count(r))
@@ -1512,7 +1529,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       t.init("handleAntiDependence");
       t.startTimer();
     }
-
     /*dbgs()<<m<<"\n";
     mf->dump();*/
     ++m;
@@ -1525,11 +1541,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
 
     auto &useMO = pair.uses.front();
     auto &defMO = pair.defs.back();
-/*
-    if (pair.reg == 14 && useMO.mi->getParent()->getName() == "if.else.i46.i")
-      useMO.mi->dump();
-*/
-
     mir->getRegionsContaining(*useMO.mi, &regions);
 
     bool useOverlapped = useMO.mi->getOperand(useMO.index).getReg() != pair.reg;
