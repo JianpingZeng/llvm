@@ -84,9 +84,10 @@ void LiveInsGather::run() {
 
   // Print out live-in registers set for each machine basic block.
   for (auto &mbb : mf) {
-    /*if (mbb.getName() == "if.end35") {
+    /*if (mbb.getName() == "if.else.i46.i") {
       printLiveRegisters(liveOutMBBMap[&mbb], false);
-    }
+    }*/
+    /*
     if (mbb.getName() == "for.body")
       printLiveRegisters(liveInMBBMap[&mbb], true);*/
 
@@ -125,6 +126,9 @@ void LiveInsGather::computeIdemLiveIns(const MachineInstr *mi) {
         removeRegisterAndSubregs(liveOuts, mo.getReg());
       else
         addRegisterWithSubregs(liveOuts, mo.getReg());
+
+      /*if (mbb->getName() == "if.else.i46.i")
+        printLiveRegisters(liveOuts, false);*/
     }
   }
 

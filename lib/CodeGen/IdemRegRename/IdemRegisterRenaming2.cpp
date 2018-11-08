@@ -167,7 +167,7 @@ private:
 
   bool isTwoAddressInstr(MachineInstr *useMI, unsigned reg);
 
-  void spillCurrentUse(AntiDeps &ad);
+  void spillCurrentUse(AntiDeps &pair);
 
   unsigned choosePhysRegForRenaming(MachineOperand *use,
                                     LiveIntervalIdem *interval,
@@ -227,6 +227,24 @@ private:
                           DenseSet<unsigned> &unallocableRegs,
                           std::vector<IdempotentRegion *> &regions);
 
+  bool partialEquals(unsigned reg1, unsigned reg2) {
+    assert(TargetRegisterInfo::isPhysicalRegister(reg1) &&
+        TargetRegisterInfo::isPhysicalRegister(reg2));
+
+    if (reg1 == reg2)
+      return true;
+    for (const unsigned *r = tri->getSubRegisters(reg1); *r; ++r)
+      if (*r == reg2)
+        return true;
+
+    for (const unsigned *r = tri->getSubRegisters(reg2); *r; ++r)
+      if (*r == reg1)
+        return true;
+
+    return false;
+  }
+
+
   void willRenameCauseOtherAntiDep(MachineBasicBlock::iterator begin,
                                    MachineBasicBlock::iterator end, MachineBasicBlock *mbb,
                                    unsigned reg, std::set<MachineBasicBlock *> &visited,
@@ -265,12 +283,17 @@ private:
     // idem exists.
     if (begin != end) {
       auto &buf = gather->getIdemLiveIns(&*begin);
-      unallocableRegs.insert(buf.begin(), buf.end());
+      std::for_each(buf.begin(), buf.end(), [&](unsigned r) {
+        addRegisterWithSubregs(unallocableRegs, r);
+        addRegisterWithSuperRegs(unallocableRegs, r);
+      });
     }
     else {
       // no idem
-      for (auto itr = mbb->livein_begin(), end = mbb->livein_end(); itr != end; ++itr)
-        unallocableRegs.insert(*itr);
+      std::for_each(mbb->livein_begin(), mbb->livein_end(), [&](unsigned r) {
+        addRegisterWithSubregs(unallocableRegs, r);
+        addRegisterWithSuperRegs(unallocableRegs, r);
+      });
     }
   }
 
@@ -371,7 +394,7 @@ void IdemRegisterRenamer::useDefChainEnds(unsigned reg,
 
       for (int i = mi->getNumOperands() - 1; i >= 0; i--) {
         auto mo = mi->getOperand(i);
-        if (!mo.isReg() || !mo.getReg() || mo.getReg() != reg)
+        if (!mo.isReg() || !mo.getReg() || !partialEquals(mo.getReg(), reg))
           continue;
         if (mo.isDef()) defs.push_back(&mo);
         else uses.push_back(&mo);
@@ -406,12 +429,15 @@ void IdemRegisterRenamer::collectAntiDepsTrace(unsigned reg,
     // use oprs firstly, then def regs.
     for (int i = itr->getNumOperands() - 1; i >= 0; i--) {
       auto mo = itr->getOperand(i);
-      if (!mo.isReg() || !mo.getReg() || mo.getReg() != reg)
+      if (!mo.isReg() || !mo.getReg())
         continue;
 
-      if (mo.isUse())
+      if (mo.isUse() && mo.getReg() == reg)
         uses.emplace_back(itr, i);
-      else {
+      else if (mo.isDef() && partialEquals(mo.getReg(), reg)) {
+        if (!defs.empty() && defs.begin()->mi->getOperand(defs.begin()->index).getReg() != mo.getReg())
+          return;
+
         defs.emplace_back(itr, i);
 
         ++itr;
@@ -502,12 +528,15 @@ void IdemRegisterRenamer::computeAntiDepsInLoop(unsigned reg,
     // use oprs firstly, then def regs.
     for (int i = itr->getNumOperands() - 1; i >= 0; i--) {
       auto mo = itr->getOperand(i);
-      if (!mo.isReg() || !mo.getReg() || mo.getReg() != reg)
+      if (!mo.isReg() || !mo.getReg())
         continue;
 
-      if (mo.isUse())
+      if (mo.isUse() && mo.getReg() == reg)
         uses.emplace_back(itr, i);
-      else {
+      else if (mo.isDef() && partialEquals(mo.getReg(), reg)) {
+        if (!defs.empty() && defs.begin()->mi->getOperand(defs.begin()->index).getReg() != mo.getReg())
+          return;
+
         defs.emplace_back(itr, i);
 
         ++itr;
@@ -540,11 +569,13 @@ void IdemRegisterRenamer::gatherAntiDeps(MachineInstr *idem) {
     return;
 
   auto begin = ++MachineBasicBlock::iterator(idem);
+  /*if (idem->getParent()->getName() == "if.else.i46.i") {
+    std::for_each(liveIns.begin(), liveIns.end(), [=](unsigned r) {
+      llvm::dbgs()<<tri->getName(r)<<",";
+    });
+    llvm::errs()<<"\n";
+  }*/
   for (auto reg : liveIns) {
-    /*if (idem->getParent()->getName() == "entry" && reg == 58) {
-      idem->getParent()->dump();
-    }*/
-
     std::set<MachineBasicBlock*> visited;
     // for an iteration of each live-in register, renew the visited set.
     collectAntiDepsTrace(reg, begin, idem->getParent()->end(),
@@ -1395,7 +1426,7 @@ void IdemRegisterRenamer::willRenameCauseOtherAntiDep(MachineBasicBlock::iterato
 
     for (int i = begin->getNumOperands() - 1; i >= 0; --i) {
       auto mo = begin->getOperand(i);
-      if (!mo.isReg() || mo.getReg() != reg || mo.isUse())
+      if (!mo.isReg() || !mo.getReg() || !partialEquals(mo.getReg(), reg) || mo.isUse())
         continue;
       canRename = false;
       return;
@@ -1482,8 +1513,8 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       t.startTimer();
     }
 
-    // dbgs()<<m<<"\n";
-    // mf->dump();
+    /*dbgs()<<m<<"\n";
+    mf->dump();*/
     ++m;
 
     auto pair = antiDeps.front();
@@ -1494,10 +1525,15 @@ bool IdemRegisterRenamer::handleAntiDependences() {
 
     auto &useMO = pair.uses.front();
     auto &defMO = pair.defs.back();
+/*
+    if (pair.reg == 14 && useMO.mi->getParent()->getName() == "if.else.i46.i")
+      useMO.mi->dump();
+*/
+
     mir->getRegionsContaining(*useMO.mi, &regions);
 
     bool useOverlapped = useMO.mi->getOperand(useMO.index).getReg() != pair.reg;
-    bool defOverlapped = defMO.mi->getOperand(defMO.index).getReg() != pair.reg;
+    bool defOverlapped = !partialEquals(defMO.mi->getOperand(defMO.index).getReg(), pair.reg);
     if (useOverlapped) {
       //======================================================================================= //
       // Handle the case that uses of different anti-dependence overlap
