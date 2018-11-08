@@ -2150,17 +2150,27 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         DenseSet<unsigned> unallocableRegs;
         for (unsigned j = 0, e = useMI->getNumOperands(); j < e; j++) {
           auto mo = useMI->getOperand(j);
-          if (mo.isReg() && mo.getReg())
+          if (mo.isReg() && mo.getReg()) {
             addRegisterWithSubregs(unallocableRegs, mo.getReg());
+            addRegisterWithSuperRegs(unallocableRegs, mo.getReg());
+          }
         }
-        unallocableRegs.insert(oldReg);
+        addRegisterWithSuperRegs(unallocableRegs, oldReg);
+        addRegisterWithSubregs(unallocableRegs, oldReg);
 
         for (auto & r : regions) {
           auto liveins = gather->getIdemLiveIns(&r->getEntry());
           std::for_each(liveins.begin(), liveins.end(), [&](unsigned reg) {
             addRegisterWithSubregs(unallocableRegs, reg);
+            addRegisterWithSuperRegs(unallocableRegs, reg);
           });
         }
+
+        // exclude the live in registers of current machine basic block
+        std::for_each(mbb->livein_begin(), mbb->livein_end(), [&](unsigned reg) {
+          addRegisterWithSubregs(unallocableRegs, reg);
+          addRegisterWithSuperRegs(unallocableRegs, reg);
+        });
 
         LiveIntervalIdem *interval = new LiveIntervalIdem;
 
