@@ -70,6 +70,35 @@ public:
   unsigned id;
   MachineOperand *mo;
   UsePoint(unsigned ID, MachineOperand *MO) : id(ID), mo(MO) {}
+
+  bool operator <(const UsePoint &rhs) const {
+    if (id < rhs.id) return true;
+    if (id > rhs.id) return false;
+
+    MachineInstr *mi = mo->getParent();
+    assert(mi == rhs.mo->getParent());
+
+    // Use first
+    if (rhs.mo->isUse() && mo->isDef())
+      return false;
+    if (mo->isUse() && rhs.mo->isDef())
+      return true;
+
+    int moIdx = -1, rhsMOIdx = -1;
+    for (int i = 0, e = mi->getNumOperands(); i < e; i++) {
+      if (&mi->getOperand(i) == mo)
+        moIdx = i;
+      if (&mi->getOperand(i) == rhs.mo)
+        rhsMOIdx = i;
+    }
+
+    assert(moIdx !=-1 && rhsMOIdx != -1);
+    return moIdx < rhsMOIdx;
+  }
+
+  bool operator == (const UsePoint &rhs) const {
+    return id == rhs.id && mo == rhs.mo;
+  }
 };
 
 struct UsePointHasher {
@@ -134,7 +163,7 @@ public:
   unsigned reg;
   LiveRangeIdem *first;
   LiveRangeIdem *last;
-  typedef std::unordered_set<UsePoint, UsePointHasher, UsePointComparator> UsePointSet;
+  typedef std::set<UsePoint> UsePointSet;
   UsePointSet usePoints;
   /**
    * Indicates the cost of spilling out this interval into memory.
@@ -147,9 +176,20 @@ public:
    */
   // bool fromLoad : 1;
 
+  /**
+   * This flag indicates there is a splitting at the beginning of this interval,
+   * so we have to insert a move instruction as resolving dataflow.
+   */
+  bool insertedMove;
+  LiveIntervalIdem *splitParent;
+  std::vector<LiveIntervalIdem* > splitChildren;
+
   LiveIntervalIdem() : reg(0), first(nullptr),
                        last(nullptr),
-                       usePoints(), costToSpill(0)/*,
+                       usePoints(), costToSpill(0),
+                       insertedMove(false),
+                       splitParent(this),
+                       splitChildren()/*,
                        fromLoad(false)*/ {}
   ~LiveIntervalIdem();
 
@@ -185,6 +225,27 @@ public:
   bool empty() { return begin() == end(); }
 
   void split(LiveIntervalAnalysisIdem *li, MachineInstr *useMI, MachineInstr *copyMI, unsigned newReg);
+
+  void setInsertedMove() { insertedMove = true; }
+
+  LiveIntervalIdem *getSplitParent() {
+    if (isSplitParent())
+      return this;
+    else
+      return splitParent->getSplitParent();
+  }
+
+  bool isSplitParent() {
+    return splitParent == this;
+  }
+
+  bool hasHoleBetween(unsigned from, unsigned to) {
+    assert(from < to);
+    if (to <= beginNumber() || from >= endNumber()) return false;
+    LiveRangeIdem *temp = new LiveRangeIdem(from, to, nullptr, nullptr);
+    return first->intersectsAt(temp) == end();
+  }
+
 private:
   /**
    * Insert live range before the current range. It will merge range to be inserted with
@@ -228,6 +289,10 @@ public:
     delete range;
   }
   void resetStart(unsigned int usePos, unsigned int newStart);
+  unsigned getUsePointAfter(unsigned int pos);
+  int getFirstUse() {
+    return usePoints.empty() ? -1 : usePoints.begin()->id;
+  }
 };
 
 class LiveIntervalAnalysisIdem : public MachineFunctionPass {
@@ -353,6 +418,16 @@ public:
                               MachineOperand *mo);
 
   void buildIntervalForRegister(unsigned reg, MachineOperand *mo);
+
+  LiveIntervalIdem* split(unsigned splitPos, LiveIntervalIdem *it);
+
+  bool isBlockBegin(unsigned pos) {
+    auto itr = std::find_if(mi2Idx.begin(), mi2Idx.end(), [&](const std::pair<MachineInstr*, unsigned> &pair) {
+      return pair.second == pos;
+    });
+    assert(itr != mi2Idx.end());
+    return itr->first == &itr->first->getParent()->front();
+  }
 };
 }
 

@@ -227,14 +227,27 @@ void LiveIntervalIdem::split(LiveIntervalAnalysisIdem *li,
 
   newInterval->last = begin;
   for (; begin != end(); ++begin) {
-    for (auto itr = usepoint_begin(), end = usepoint_end(); itr != end; ++itr) {
+    for (auto itr = usepoint_begin(), end = usepoint_end(); itr != end; ) {
       if (itr->id >= begin->start && itr->id < begin->end) {
         newInterval->addUsePoint(itr->id, itr->mo);
-        usePoints.erase(itr);
+        itr = usePoints.erase(itr);
       }
+      else
+        ++itr;
     }
     newInterval->last = begin;
   }
+}
+
+unsigned LiveIntervalIdem::getUsePointAfter(unsigned int pos) {
+  UsePoint *up = 0;
+  for (auto itr : usePoints) {
+    if (itr.id >= pos) {
+      if (!up || itr.id < up->id)
+        up = &itr;
+    }
+  }
+  return up ? up->id : UINT32_MAX;
 }
 
 char LiveIntervalAnalysisIdem::ID = 0;
@@ -622,4 +635,61 @@ void LiveIntervalAnalysisIdem::buildIntervalForRegister(unsigned reg,
     } else
       cost += 1;
   }
+}
+
+LiveIntervalIdem* LiveIntervalAnalysisIdem::split(unsigned splitPos, LiveIntervalIdem *it) {
+  LiveIntervalIdem *child = new LiveIntervalIdem;
+  child->reg = it->reg;
+  child->splitParent = it->getSplitParent();
+  it->getSplitParent()->splitChildren.push_back(child);
+
+  LiveRangeIdem *cur = it->first, *prev = nullptr;
+  while (cur && cur->end <= splitPos) {
+    prev = cur;
+    cur = cur->next;
+  }
+
+  assert(cur && "Split position after the end number of live interval!");
+  if (cur->start < splitPos) {
+    /*
+     *     splitPos
+     *       |
+     * |----------------|
+     * ^                ^
+     * cur.from      cur.to
+     */
+    child->first = new LiveRangeIdem(splitPos, cur->end, cur->next, nullptr);
+    cur->end = splitPos;
+    cur->next = nullptr;
+    it->last = cur;
+  }
+  else {
+    /*
+     * splitPos
+     * |
+     * |----------------|
+     * ^                ^
+     * cur.from      cur.to
+     * where, splitPos <= cur.from
+     */
+    child->first = cur;
+    cur->prev  = nullptr;
+    assert(prev && "Split position before begin number!");
+
+    prev->next = nullptr;
+    prev->end = splitPos;
+    it->last = prev;
+  }
+
+  // Split the use points
+  std::set<UsePoint> childUsePoints;
+  for (auto itr = it->usepoint_begin(), end = it->usepoint_end(); itr != end; ) {
+    UsePoint up = *itr;
+    if (up.id >= splitPos) {
+      childUsePoints.insert(up);
+      itr = it->usePoints.erase(itr);
+    }
+  }
+  child->usePoints = childUsePoints;
+  return child;
 }

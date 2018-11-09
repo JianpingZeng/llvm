@@ -102,6 +102,9 @@ struct AntiDeps {
   }
 };
 
+typedef std::priority_queue<LiveIntervalIdem *, SmallVector<LiveIntervalIdem *, 64>,
+                            llvm::greater_ptr<LiveIntervalIdem>> IntervalMap;
+
 class IdemRegisterRenamer : public MachineFunctionPass {
 public:
   static char ID;
@@ -116,6 +119,8 @@ public:
     mri = nullptr;
     mfi = nullptr;
     dt = nullptr;
+    ml = nullptr;
+    cur = nullptr;
   }
 
   bool runOnMachineFunction(MachineFunction &MF) override;
@@ -124,6 +129,7 @@ public:
     AU.addRequired<LiveIntervalAnalysisIdem>();
     AU.addRequired<MachineIdempotentRegions>();
     AU.addRequired<MachineDominatorTree>();
+    AU.addRequired<MachineLoopInfo>();
     AU.setPreservesAll();
     MachineFunctionPass::getAnalysisUsage(AU);
   }
@@ -143,6 +149,7 @@ public:
     mri = nullptr;
     mfi = nullptr;
     dt = nullptr;
+    ml = nullptr;
     antiDeps.clear();
     region2NumAntiDeps.clear();
   }
@@ -180,7 +187,25 @@ private:
   unsigned tryChooseFreeRegister(LiveIntervalIdem &interval,
                                  int useReg,
                                  BitVector &allocSet);
-  unsigned tryChooseBlockedRegister(LiveIntervalIdem &interval,
+  void initializeIntervalSet(LiveIntervalIdem *unhandledInterval);
+
+  void prehandled(unsigned position);
+
+  unsigned allocateBlockedRegister(LiveIntervalIdem *interval,
+                                   BitVector &allocSet);
+
+  void splitAndSpill(LiveIntervalIdem *it, unsigned startPos, unsigned endPos, bool isActive);
+
+  LiveIntervalIdem *splitBeforeUsage(LiveIntervalIdem *it, unsigned minSplitPos, unsigned maxSplitPos);
+
+  unsigned findOptimalSplitPos(LiveIntervalIdem *it, unsigned minSplitPos, unsigned maxSplitPos);
+
+  unsigned findOptimalSplitPos(MachineBasicBlock *minBlock, MachineBasicBlock *maxBlock,
+                               unsigned maxSplitPos);
+
+  void linearScan(BitVector &allocSet);
+
+  unsigned tryChooseBlockedRegister(LiveIntervalIdem *interval,
                                     int useReg,
                                     BitVector &allocSet);
   bool getSpilledSubLiveInterval(LiveIntervalIdem *interval,
@@ -359,12 +384,20 @@ private:
   MachineRegisterInfo *mri;
   MachineFrameInfo *mfi;
   MachineDominatorTree *dt;
+  MachineLoopInfo *ml;
+
   /**
    * This map used for recording the number of anti-dependencies for each
    * idmepotent region indicated by idem instruction.
    */
   std::map<MachineInstr*, size_t> region2NumAntiDeps;
   BitVector reservedRegs;
+  IntervalMap unhandled;
+  std::vector<LiveIntervalIdem *> handled;
+  std::vector<LiveIntervalIdem *> active;
+  std::vector<LiveIntervalIdem *> inactive;
+  LiveIntervalIdem *cur;
+  std::map<LiveIntervalIdem*, unsigned> interval2AssignedRegMap;
 };
 }
 
@@ -373,6 +406,7 @@ INITIALIZE_PASS_BEGIN(IdemRegisterRenamer, "reg-renaming",
   INITIALIZE_PASS_DEPENDENCY(LiveIntervalAnalysisIdem)
   INITIALIZE_PASS_DEPENDENCY(MachineIdempotentRegions)
   INITIALIZE_PASS_DEPENDENCY(MachineDominatorTree)
+  INITIALIZE_PASS_DEPENDENCY(MachineLoopInfo)
 INITIALIZE_PASS_END(IdemRegisterRenamer, "reg-renaming",
                     "Register Renaming for Idempotence", false, false)
 
@@ -915,6 +949,7 @@ static MachineInstr *getNextMI(MachineInstr *mi) {
   return ilist_traits<MachineInstr>::getNext(mi);
 }
 
+#if 0
 void IdemRegisterRenamer::insertSpillingCodeForInterval(LiveIntervalIdem *spilledItr) {
   int frameIndex;
 
@@ -976,9 +1011,6 @@ void IdemRegisterRenamer::insertSpillingCodeForInterval(LiveIntervalIdem *spille
     }
   }
 }
-
-typedef std::priority_queue<LiveIntervalIdem *, SmallVector<LiveIntervalIdem *, 64>,
-                            llvm::greater_ptr<LiveIntervalIdem>> IntervalMap;
 
 SmallVector<unsigned, 32> regUse;
 
@@ -1100,51 +1132,267 @@ void IdemRegisterRenamer::revisitSpilledInterval(std::vector<LiveIntervalIdem *>
     handled.push_back(cur);
   }
 }
+#endif
 
-unsigned IdemRegisterRenamer::tryChooseBlockedRegister(LiveIntervalIdem &interval,
+void IdemRegisterRenamer::initializeIntervalSet(LiveIntervalIdem *unhandledInterval) {
+  unhandled.push(unhandledInterval);
+  for (auto itr = li->interval_begin(), end = li->interval_end(); itr != end; ++itr) {
+    assert(TargetRegisterInfo::isPhysicalRegister(itr->first));
+    active.push_back(itr->second);
+  }
+}
+
+void IdemRegisterRenamer::prehandled(unsigned position) {
+  // check for intervals in active that are expired or inactive.
+  for (auto itr = active.begin(), end = active.end(); itr != end; ) {
+    LiveIntervalIdem *interval = *itr;
+    if (interval->isExpiredAt(position)) {
+      itr = active.erase(itr);
+      handled.push_back(interval);
+    }
+    else if (!interval->isLiveAt(position)) {
+      itr = active.erase(itr);
+      inactive.push_back(interval);
+    }
+  }
+
+  // checks for intervals in inactive that are expired or active.
+  for (auto itr = inactive.begin(), end = inactive.end(); itr != end; ++itr) {
+    LiveIntervalIdem *interval = *itr;
+    if (interval->isExpiredAt(position)) {
+      itr = inactive.erase(itr);
+      handled.push_back(interval);
+    }
+    else if (interval->isLiveAt(position)) {
+      itr = inactive.erase(itr);
+      active.push_back(interval);
+    }
+  }
+}
+
+unsigned IdemRegisterRenamer::findOptimalSplitPos(LiveIntervalIdem *it,
+                                                  unsigned minSplitPos,
+                                                  unsigned maxSplitPos) {
+  if (minSplitPos == maxSplitPos)
+    return minSplitPos;
+
+  MachineBasicBlock *minBlock = li->getBlockAtId(minSplitPos - 1);
+  MachineBasicBlock *maxBlock = li->getBlockAtId(maxSplitPos - 1);
+  if (minBlock == maxBlock)
+    return maxSplitPos;
+
+  if (it->hasHoleBetween(maxSplitPos - 1, maxSplitPos) &&
+      !li->isBlockBegin(maxSplitPos)) {
+    // Do not move split position if the interval has a hole before
+    // maxSplitPos. Intervals resulting from Phi-Functions have
+    // more than one definition with a hole before each definition.
+    // When the register is needed for the second definition, an
+    // earlier reloading is unnecessary.
+    return maxSplitPos;
+  }
+  else
+    return findOptimalSplitPos(minBlock, maxBlock, maxSplitPos);
+}
+
+unsigned IdemRegisterRenamer::findOptimalSplitPos(MachineBasicBlock *minBlock,
+                                                  MachineBasicBlock *maxBlock,
+                                                  unsigned maxSplitPos) {
+  // Try to split at end of maxBlock. If this would be after
+  // maxSplitPos, then use the begin of maxBlock
+  unsigned optimalSplitPos = li->getIndex(&maxBlock->back()) + 2;
+  if (optimalSplitPos > maxSplitPos)
+    optimalSplitPos = li->getIndex(&maxBlock->front());
+
+  int fromBlockId = minBlock->getNumber();
+  int toBlockId = maxBlock->getNumber();
+  unsigned minLoopDepth = ml->getLoopDepth(maxBlock);
+
+  for (int i = toBlockId - 1; i >= fromBlockId; --i) {
+    MachineBasicBlock *curMBB = mf->getBlockNumbered(i);
+    unsigned depth = ml->getLoopDepth(curMBB);
+    if (depth < minLoopDepth) {
+      minLoopDepth = depth;
+      optimalSplitPos = li->getIndex(&curMBB->back()) + 2;
+    }
+  }
+
+  return optimalSplitPos;
+}
+
+LiveIntervalIdem* IdemRegisterRenamer::splitBeforeUsage(LiveIntervalIdem *it,
+                                                        unsigned minSplitPos,
+                                                        unsigned maxSplitPos) {
+  assert(minSplitPos < maxSplitPos);
+
+  unsigned optimalSplitPos = findOptimalSplitPos(it, minSplitPos, maxSplitPos);
+  assert(minSplitPos <= optimalSplitPos && optimalSplitPos <= maxSplitPos);
+  if (optimalSplitPos == cur->endNumber())
+    // If the optimal split position is at the end of current interval,
+    // so splitting is not at all necessary.
+    return nullptr;
+
+  LiveIntervalIdem *rightPart = li->split(optimalSplitPos, it);
+  rightPart->setInsertedMove();
+  return rightPart;
+}
+
+void IdemRegisterRenamer::splitAndSpill(LiveIntervalIdem *it,
+                                        unsigned startPos,
+                                        unsigned endPos,
+                                        bool isActive) {
+  if (isActive) {
+    unsigned minSplitPos = startPos + 1;
+    unsigned maxSplitPos = std::min(it->getUsePointAfter(minSplitPos), it->endNumber());
+    LiveIntervalIdem *splitChildren = splitBeforeUsage(it, minSplitPos, maxSplitPos);
+    // insert a store instruction after the last use point of it
+    LiveIntervalIdem *parent = it->getSplitParent();
+    const TargetRegisterClass *rc = tri->getMinimalPhysRegClass(it->reg);
+    int frameIndex;
+    if (hasFrameSlot(parent))
+      frameIndex = getFrameIndex(parent);
+    else {
+      frameIndex = mfi->CreateSpillStackObject(rc->getSize(), rc->getAlignment());
+      setFrameIndex(parent, frameIndex);
+    }
+    if (!it->usePoints.empty()) {
+      MachineInstr *mi = it->usePoints.rbegin()->mo->getParent();
+      MachineInstr *st;
+      if (mi == &mi->getParent()->back()) {
+        tii->storeRegToStackSlot(*mi->getParent(), mi->getParent()->end(),
+            it->reg, false, frameIndex, rc, tri);
+      }
+      else {
+        MachineInstr *pos = getNextMI(mi);
+        tii->storeRegToStackSlot(*mi->getParent(), pos,
+                                 it->reg, false, frameIndex, rc, tri);
+      }
+      st = getNextMI(mi);
+      li->mi2Idx[st] = li->getIndex(mi) + 1;
+
+      if (splitChildren != nullptr) {
+        minSplitPos = endPos + 1;
+        maxSplitPos = splitChildren->getUsePointAfter(endPos);
+        splitChildren = splitBeforeUsage(splitChildren, minSplitPos, maxSplitPos);
+        if (splitChildren) {
+          // insert a load instruction before the first use point of splitChildren
+          if (!splitChildren->usePoints.empty()) {
+            mi = splitChildren->usepoint_begin()->mo->getParent();
+            tii->loadRegFromStackSlot(*mi->getParent(), mi, it->reg, frameIndex, rc, tri);
+            auto ld = getPrevMI(mi);
+            li->mi2Idx[ld] = li->getIndex(mi) - 1;
+          }
+        }
+      }
+    }
+  }
+  else {
+    auto itr = it->upperBound(it->begin(), it->end(), endPos);
+    if (itr == it->end())
+      itr = RangeIterator(it->getLast());
+    else
+      --itr;
+
+    assert(!itr->contains(endPos));
+    // if itr doesn't contain the end position, which indicates there is a hole containing
+    // [startPos, endPos)
+  }
+}
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wsign-compare"
+unsigned IdemRegisterRenamer::allocateBlockedRegister(LiveIntervalIdem *interval,
+                                                      BitVector &allocSet) {
+  auto size = tri->getNumRegs();
+  unsigned *freeUntilPos = new unsigned[size];
+  unsigned *blockPosBy = new unsigned[size];
+
+  for (int reg = allocSet.find_first(); reg != -1; reg = allocSet.find_next(reg)) {
+    freeUntilPos[reg] = UINT32_MAX;
+    blockPosBy[reg] = UINT32_MAX;
+  }
+
+  for (LiveIntervalIdem *itr : active) {
+    assert(TargetRegisterInfo::isPhysicalRegister(itr->reg));
+    freeUntilPos[itr->reg] = interval->getUsePointAfter(interval->beginNumber());
+    blockPosBy[itr->reg] = 0;
+  }
+
+  for (LiveIntervalIdem *itr : inactive) {
+    if (!itr->intersects(interval))
+      continue;
+
+    blockPosBy[itr->reg] = itr->intersectAt(interval)->start;
+    freeUntilPos[itr->reg] = interval->getUsePointAfter(interval->beginNumber());
+  }
+
+  unsigned reg = 0, max = 0;
+  for (unsigned i = 0; i < size; i++) {
+    if (freeUntilPos[i] > max) {
+      max = freeUntilPos[i];
+      reg = i;
+    }
+  }
+
+  assert(reg && max);
+
+  int firstUseOfCur = interval->getFirstUse();
+  if (freeUntilPos[reg] <= firstUseOfCur) {
+    // Return 0 indicates we can't allocate the current interval with a register
+    return 0;
+  }
+  unsigned splitPos = blockPosBy[reg];
+  if (splitPos <= interval->endNumber())
+    return 0;
+
+  for (auto itr = active.begin(), end = active.end(); itr != end; ) {
+    if ((*itr)->reg != reg)
+      continue;
+
+    if ((*itr)->intersects(interval)) {
+      itr = active.erase(itr);
+      splitAndSpill(*itr, interval->beginNumber(), interval->endNumber(), true);
+    }
+    else
+      ++itr;
+  }
+
+  for (auto itr = inactive.begin(), end = inactive.end(); itr != end;) {
+    if ((*itr)->reg != reg)
+      continue;
+
+    if ((*itr)->intersects(interval)) {
+      itr = inactive.erase(itr);
+      splitAndSpill(*itr, interval->beginNumber(), interval->endNumber(), false);
+    }
+  }
+
+  delete[] blockPosBy;
+  delete[] freeUntilPos;
+  return reg;
+}
+#pragma GCC diagnostic pop
+
+void IdemRegisterRenamer::linearScan(BitVector &allocSet) {
+  while (!unhandled.empty()) {
+    cur = unhandled.top();
+    unhandled.pop();
+
+    unsigned position = cur->beginNumber();
+    // pre-handling, like move expired interval from active to handled list.
+    prehandled(position);
+
+    unsigned newReg = allocateBlockedRegister(cur, allocSet);
+    interval2AssignedRegMap[cur] = newReg;
+  }
+}
+unsigned IdemRegisterRenamer::tryChooseBlockedRegister(LiveIntervalIdem *interval,
                                                        int useReg,
                                                        BitVector &allocSet) {
   // choose an interval to be evicted into memory, and insert spilling code as
   // appropriate.
-  unsigned costMax = INT_MAX;
-  LiveIntervalIdem *targetInter = nullptr;
-  std::vector<LiveIntervalIdem *> spilledIntervs;
-
-  for (auto physReg = allocSet.find_first(); physReg > 0;
-       physReg = allocSet.find_next(physReg)) {
-    if (!legalToReplace(physReg, useReg))
-      continue;
-    assert(li->intervals.count(physReg) && "Why tryChooseFreeRegister does't return it?");
-    auto phyItv = li->intervals[physReg];
-    IDEM_DEBUG(llvm::errs() << "Found: " << tri->getMinimalPhysRegClass(physReg) << "\n";);
-
-    if (mri->isLiveIn(physReg))
-      continue;
-
-    assert(interval.intersects(phyItv) &&
-        "should not have interval doesn't interfere with current interval");
-    if (phyItv->costToSpill < costMax) {
-      costMax = phyItv->costToSpill;
-      targetInter = phyItv;
-    }
-  }
-
-  // no proper interval found to be spilled out.
-  if (!targetInter)
-    return 0;
-
-  IDEM_DEBUG(llvm::errs() << "Selected evicted physical register is: "
-                          << tri->getName(targetInter->reg) << "\n";
-                 llvm::errs() << "\nSelected evicted interval is: ";
-                 targetInter->dump(tri););
-
-  if (!getSpilledSubLiveInterval(targetInter, spilledIntervs))
-    return 0;
-
-  if (!spilledIntervs.empty())
-    revisitSpilledInterval(spilledIntervs);
-
-  return targetInter->reg;
+  initializeIntervalSet(interval);
+  linearScan(allocSet);
+  return interval2AssignedRegMap[interval];
 }
 
 /**
@@ -1239,7 +1487,7 @@ unsigned IdemRegisterRenamer::choosePhysRegForRenaming(MachineOperand *use,
   unsigned useReg = use->getReg();
   unsigned freeReg = tryChooseFreeRegister(*interval, useReg, allocSet);
   if (!freeReg) {
-    freeReg = tryChooseBlockedRegister(*interval, useReg, allocSet);
+    freeReg = tryChooseBlockedRegister(interval, useReg, allocSet);
   }
   return freeReg;
 }
@@ -2268,6 +2516,8 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   li = getAnalysisIfAvailable<LiveIntervalAnalysisIdem>();
   assert(li);
   dt = getAnalysisIfAvailable<MachineDominatorTree>();
+  ml = getAnalysisIfAvailable<MachineLoopInfo>();
+
   tii = MF.getTarget().getInstrInfo();
   tri = MF.getTarget().getRegisterInfo();
   mf = &MF;
