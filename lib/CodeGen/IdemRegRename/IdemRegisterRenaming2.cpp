@@ -1135,9 +1135,17 @@ void IdemRegisterRenamer::revisitSpilledInterval(std::vector<LiveIntervalIdem *>
 #endif
 
 void IdemRegisterRenamer::initializeIntervalSet(LiveIntervalIdem *unhandledInterval) {
+  active.clear();
+  inactive.clear();
+  handled.clear();
+  interval2AssignedRegMap.clear();
+  cur = nullptr;
+  unhandled = IntervalMap();
+
   unhandled.push(unhandledInterval);
   for (auto itr = li->interval_begin(), end = li->interval_end(); itr != end; ++itr) {
     assert(TargetRegisterInfo::isPhysicalRegister(itr->first));
+    itr->second->reg = itr->first;
     active.push_back(itr->second);
   }
 }
@@ -1384,8 +1392,11 @@ void IdemRegisterRenamer::linearScan(BitVector &allocSet) {
     unsigned position = cur->beginNumber();
     // pre-handling, like move expired interval from active to handled list.
     prehandled(position);
-
     unsigned newReg = allocateBlockedRegister(cur, allocSet);
+    if (newReg) {
+      cur->reg = newReg;
+      li->insertOrCreateInterval(newReg, cur);
+    }
     interval2AssignedRegMap[cur] = newReg;
   }
 }
