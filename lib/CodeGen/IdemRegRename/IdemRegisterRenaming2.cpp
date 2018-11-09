@@ -1144,7 +1144,7 @@ void IdemRegisterRenamer::initializeIntervalSet(LiveIntervalIdem *unhandledInter
 
 void IdemRegisterRenamer::prehandled(unsigned position) {
   // check for intervals in active that are expired or inactive.
-  for (auto itr = active.begin(), end = active.end(); itr != end; ) {
+  for (auto itr = active.begin(); itr != active.end(); ) {
     LiveIntervalIdem *interval = *itr;
     if (interval->isExpiredAt(position)) {
       itr = active.erase(itr);
@@ -1154,10 +1154,12 @@ void IdemRegisterRenamer::prehandled(unsigned position) {
       itr = active.erase(itr);
       inactive.push_back(interval);
     }
+    else
+      ++itr;
   }
 
   // checks for intervals in inactive that are expired or active.
-  for (auto itr = inactive.begin(), end = inactive.end(); itr != end; ++itr) {
+  for (auto itr = inactive.begin(); itr != inactive.end(); ) {
     LiveIntervalIdem *interval = *itr;
     if (interval->isExpiredAt(position)) {
       itr = inactive.erase(itr);
@@ -1167,6 +1169,8 @@ void IdemRegisterRenamer::prehandled(unsigned position) {
       itr = inactive.erase(itr);
       active.push_back(interval);
     }
+    else
+      ++itr;
   }
 }
 
