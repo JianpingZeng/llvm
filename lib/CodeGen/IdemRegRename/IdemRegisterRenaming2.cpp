@@ -221,11 +221,16 @@ private:
                               bool &canReplace,
                               bool seeIdem);
 
-  void collectUnallocableRegs(MachineBasicBlock::reverse_iterator begin,
-                              MachineBasicBlock::reverse_iterator end,
-                              MachineBasicBlock *mbb,
-                              std::set<MachineBasicBlock*> &visited,
+  void collectUnallocableRegs(AntiDeps &pair,
+                              MachineInstr *&insertedPos,
+                              std::vector<IdempotentRegion *> &regions,
                               DenseSet<unsigned> &unallocableRegs);
+
+  void collectUnallocableRegsDFS(MachineBasicBlock::reverse_iterator begin,
+                                 MachineBasicBlock::reverse_iterator end,
+                                 MachineBasicBlock *mbb,
+                                 std::set<MachineBasicBlock *> &visited,
+                                 DenseSet<unsigned> &unallocableRegs);
 
   unsigned getNumFreeRegs(unsigned reg, DenseSet<unsigned> &unallocableRegs);
 
@@ -1409,7 +1414,7 @@ static void findAllReachableDefs(MachineBasicBlock::reverse_iterator begin,
 void IdemRegisterRenamer::spillCurrentUse(AntiDeps &pair) {
 
   // spill indicates if we have to spill current useMO when
-  // tehre is no other free or blocked register available.
+  // there is no other free or blocked register available.
   auto useMO = pair.uses.front();
 
   // Program reach here indicates we can't find any free or blocked register to be used as
@@ -1421,6 +1426,8 @@ void IdemRegisterRenamer::spillCurrentUse(AntiDeps &pair) {
       useMO.mi->getParent(),
       pair.reg, defs, visited);
 
+  // We should find a stack slot where the value of register reads instead of
+  // creating a new stack slot.
   int slotFI = 0;
   const TargetRegisterClass *rc = tri->getMinimalPhysRegClass(pair.reg);
   slotFI = mfi->CreateSpillStackObject(rc->getSize(), rc->getAlignment());
@@ -1596,11 +1603,53 @@ void IdemRegisterRenamer::getUsesSetOfDef(MachineOperand *def,
   usesAndDefs.insert(usesAndDefs.end(), defs.begin(), defs.end());
 }
 
-void IdemRegisterRenamer::collectUnallocableRegs(MachineBasicBlock::reverse_iterator begin,
-                                                 MachineBasicBlock::reverse_iterator end,
-                                                 MachineBasicBlock *mbb,
-                                                 std::set<MachineBasicBlock*> &visited,
+void IdemRegisterRenamer::collectUnallocableRegs(AntiDeps &pair,
+                                                 MachineInstr *&insertedPos,
+                                                 std::vector<IdempotentRegion *> &regions,
                                                  DenseSet<unsigned> &unallocableRegs) {
+  std::set<MachineBasicBlock*> visited;
+  unsigned minIndex = UINT32_MAX;
+  auto useMO = pair.uses.front();
+
+  for (auto r : regions) {
+    MachineInstr &idem = r->getEntry();
+    auto liveins = gather->getIdemLiveIns(&idem);
+    std::for_each(liveins.begin(), liveins.end(), [&](unsigned reg) {
+      addRegisterWithSubregs(unallocableRegs, reg);
+    });
+
+    auto begin = MachineBasicBlock::reverse_iterator(idem);
+    visited.clear();
+    collectUnallocableRegsDFS(begin, idem.getParent()->rend(),
+                              idem.getParent(), visited, unallocableRegs);
+
+    unsigned index = li->getIndex(&idem);
+    if (index < minIndex) {
+      minIndex = index;
+      insertedPos = &idem;
+    }
+  }
+
+  // can not assign the old register to use mi
+  addRegisterWithSubregs(unallocableRegs, pair.reg);
+  auto begin = pair.uses.begin(), end = pair.uses.end();
+  std::for_each(begin, end, [&](MIOp &op) {
+    MachineInstr *useMI = op.mi;
+    for (unsigned j = 0, e = useMI->getNumOperands(); j < e; j++) {
+      auto mo = useMI->getOperand(j);
+      if (mo.isReg() && mo.getReg() && mo.isDef())
+        addRegisterWithSubregs(unallocableRegs, mo.getReg());
+    }
+  });
+
+  countRegistersRaiseAntiDep(useMO.mi, useMO.mi->getParent()->end(), useMO.mi->getParent(), unallocableRegs);
+}
+
+void IdemRegisterRenamer::collectUnallocableRegsDFS(MachineBasicBlock::reverse_iterator begin,
+                                                    MachineBasicBlock::reverse_iterator end,
+                                                    MachineBasicBlock *mbb,
+                                                    std::set<MachineBasicBlock *> &visited,
+                                                    DenseSet<unsigned> &unallocableRegs) {
   if (!mbb || !visited.insert(mbb).second)
     return;
 
@@ -1615,7 +1664,7 @@ void IdemRegisterRenamer::collectUnallocableRegs(MachineBasicBlock::reverse_iter
   }
 
   std::for_each(mbb->pred_begin(), mbb->pred_end(), [&](MachineBasicBlock *pred){
-    collectUnallocableRegs(pred->rbegin(), pred->rend(), pred, visited, unallocableRegs);
+    collectUnallocableRegsDFS(pred->rbegin(), pred->rend(), pred, visited, unallocableRegs);
   });
 }
 
@@ -1744,6 +1793,8 @@ void IdemRegisterRenamer::countRegistersRaiseAntiDep(MachineBasicBlock::iterator
   }
 }
 
+static int m;
+
 bool IdemRegisterRenamer::handleAntiDependences() {
   if (antiDeps.empty())
     return false;
@@ -1753,6 +1804,10 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     // llvm::dbgs()<<antiDeps.size()<<"\n";
     auto pair = antiDeps.front();
     antiDeps.pop_front();
+
+    ++m;
+    // llvm::dbgs()<<m++<<"\n";
+    // mf->dump();
 
     if (pair.uses.empty() || pair.defs.empty())
       continue;
@@ -2209,40 +2264,8 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       // R0, ... = LDR_INC R0  (two address instr)
       // we should insert a special move instr for two address instr.
       MachineInstr *insertedPos = nullptr;
-      unsigned minIndex = UINT32_MAX;
-      insertedPos = nullptr;
       DenseSet<unsigned> unallocableRegs;
-
-      for (auto r : regions) {
-        MachineInstr &idem = r->getEntry();
-        auto liveins = gather->getIdemLiveIns(&idem);
-        std::for_each(liveins.begin(), liveins.end(), [&](unsigned reg) {
-          addRegisterWithSubregs(unallocableRegs, reg);
-        });
-
-        auto begin = MachineBasicBlock::reverse_iterator(idem);
-        visited.clear();
-        collectUnallocableRegs(begin, idem.getParent()->rend(),
-                               idem.getParent(), visited, unallocableRegs);
-
-        unsigned index = li->getIndex(&idem);
-        if (index < minIndex) {
-          minIndex = index;
-          insertedPos = &idem;
-        }
-      }
-
-      // can not assign the old register to use mi
-      addRegisterWithSubregs(unallocableRegs, pair.reg);
-      auto begin = pair.uses.begin(), end = pair.uses.end();
-      std::for_each(begin, end, [&](MIOp &op) {
-        MachineInstr *useMI = op.mi;
-        for (unsigned j = 0, e = useMI->getNumOperands(); j < e; j++) {
-          auto mo = useMI->getOperand(j);
-          if (mo.isReg() && mo.getReg() && mo.isDef())
-            addRegisterWithSubregs(unallocableRegs, mo.getReg());
-        }
-      });
+      collectUnallocableRegs(pair, insertedPos, regions, unallocableRegs);
 
       /**
        * Avoiding repeatedly erase and add anti-dependence like following example.
@@ -2280,9 +2303,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         continue;
       }
 
-      countRegistersRaiseAntiDep(useMO.mi, useMO.mi->getParent()->end(), useMO.mi->getParent(), unallocableRegs);
       phyReg = choosePhysRegForRenaming(&miOp.mi->getOperand(miOp.index), interval, unallocableRegs);
-
       if (!phyReg) {
         spillCurrentUse(pair);
         continue;
@@ -2491,6 +2512,7 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   mri = &MF.getRegInfo();
   mfi = MF.getFrameInfo();
   reservedRegs = tri->getReservedRegs(*mf);
+  m = 0;
 
   // Collects anti-dependences operand pair.
   /*llvm::errs() << "Before renaming2: \n";

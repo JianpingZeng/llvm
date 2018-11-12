@@ -1025,7 +1025,7 @@ index cebd74a..cb738ca 100644
 --        auto begin = MachineBasicBlock::reverse_iterator(idem);
 -+        /*auto begin = MachineBasicBlock::reverse_iterator(idem);
 -         visited.clear();
--         collectUnallocableRegs(begin, idem.getParent()->rend(),
+-         collectUnallocableRegsDFS(begin, idem.getParent()->rend(),
 --            idem.getParent(), visited, unallocableRegs);
 -+            idem.getParent(), visited, unallocableRegs);*/
 - 
