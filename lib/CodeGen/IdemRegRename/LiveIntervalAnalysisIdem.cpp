@@ -163,6 +163,13 @@ void LiveIntervalIdem::removeRange(unsigned from, unsigned to) {
   upper->end = from;
   LiveRangeIdem *pos = *(++upper);
   insertRangeBefore(to, oldEnd, pos);
+
+  for (auto itr = usePoints.begin(), end = usepoint_end(); itr != end; ) {
+    if (from <= itr->id && itr->id <= to)
+      itr = usePoints.erase(itr);
+    else
+      ++itr;
+  }
 }
 
 void LiveIntervalIdem::resetStart(unsigned int usePos, unsigned int newStart) {
@@ -248,6 +255,20 @@ unsigned LiveIntervalIdem::getUsePointAfter(unsigned int pos) {
     }
   }
   return up ? up->id : UINT32_MAX;
+}
+
+unsigned LiveIntervalIdem::getUsePointBefore(unsigned pos) {
+  assert(pos >= beginNumber());
+
+  UsePoint *up = nullptr;
+  for (auto itr : usePoints) {
+    if (itr.id <= pos) {
+      if (!up || itr.id > up->id)
+        up = &itr;
+    }
+  }
+  assert(up);
+  return up->id;
 }
 
 char LiveIntervalAnalysisIdem::ID = 0;
@@ -516,15 +537,7 @@ void LiveIntervalAnalysisIdem::weightLiveInterval() {
   auto end = interval_end();
   for (; itr != end; ++itr) {
     // Weight each use point by it's loop nesting deepth.
-    unsigned cost = 0;
-    for (auto &up : itr->second->usePoints) {
-      MachineBasicBlock *mbb = up.mo->getParent()->getParent();
-      if (MachineLoop *ml = loopInfo->getLoopFor(mbb)) {
-        cost += 10 * ml->getLoopDepth();
-      } else
-        cost += 1;
-    }
-    itr->second->costToSpill = cost;
+    computeCostToSpill(itr->second);
   }
 }
 

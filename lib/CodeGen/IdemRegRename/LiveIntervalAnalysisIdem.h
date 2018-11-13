@@ -239,11 +239,49 @@ public:
     return splitParent == this;
   }
 
+  bool isSplitChildren() {
+    return !isSplitParent();
+  }
+
+  bool hasSplitChildren() {
+    return splitParent && !splitChildren.empty();
+  }
+
   bool hasHoleBetween(unsigned from, unsigned to) {
     assert(from < to);
     if (to <= beginNumber() || from >= endNumber()) return false;
     LiveRangeIdem *temp = new LiveRangeIdem(from, to, nullptr, nullptr);
     return first->intersectsAt(temp) == end();
+  }
+
+  LiveIntervalIdem *getSplitChildBeforeOpId(unsigned id) {
+    LiveIntervalIdem *parent = getSplitParent();
+    LiveIntervalIdem *result = nullptr;
+
+    assert(parent->hasSplitChildren() && "No split children available");
+    size_t len = parent->splitChildren.size();
+    for (int i = len - 1; i >= 0; --i) {
+      LiveIntervalIdem *cur = parent->splitChildren[i];
+      if (cur->endNumber() <= id && (!result || result->endNumber() <= cur->endNumber()))
+        result = cur;
+    }
+
+    assert(result && "no split child found");
+    return result;
+  }
+
+  LiveIntervalIdem *getSplitChildAtOpId(unsigned id) {
+    LiveIntervalIdem *parent = getSplitParent();
+    LiveIntervalIdem *result = nullptr;
+    assert(parent->hasSplitChildren());
+
+    for (auto itr = parent->splitChildren.begin(),
+             end = parent->splitChildren.end(); itr != end; ++itr) {
+      LiveIntervalIdem *cur = *itr;
+      if (cur->isLiveAt(id))
+        result = cur;
+    }
+    return result;
   }
 
 private:
@@ -290,6 +328,7 @@ public:
   }
   void resetStart(unsigned int usePos, unsigned int newStart);
   unsigned getUsePointAfter(unsigned int pos);
+  unsigned getUsePointBefore(unsigned pos);
   int getFirstUse() {
     return usePoints.empty() ? -1 : usePoints.begin()->id;
   }
@@ -388,9 +427,9 @@ public:
   bool runOnMachineFunction(MachineFunction &MF) override;
 
   MachineBasicBlock *getBlockAtId(unsigned pos) {
-    unsigned index = pos / NUM;
-    assert(index < idx2MI.size());
-    return idx2MI[index]->getParent();
+    auto mi = getMachineInstr(pos);
+    assert(mi);
+    return mi->getParent();
   }
 
   unsigned getIndex(MachineInstr *mi) {
@@ -398,9 +437,12 @@ public:
     return mi2Idx[mi];
   }
 
-  unsigned getIndexAtMBB(unsigned id) {
-    return id / NUM;
+  MachineInstr* getMachineInstr(unsigned index) {
+    assert(index < idx2MI.size());
+    assert(idx2MI[index]);
+    return idx2MI[index];
   }
+
   void insertOrCreateInterval(unsigned int reg, LiveIntervalIdem *pIdem);
 
   void dump();
@@ -427,6 +469,20 @@ public:
     });
     assert(itr != mi2Idx.end());
     return itr->first == &itr->first->getParent()->front();
+  }
+
+
+  void computeCostToSpill(LiveIntervalIdem *it) {
+    // Weight each use point by it's loop nesting deepth.
+    unsigned cost = 0;
+    for (auto &up : it->usePoints) {
+      MachineBasicBlock *mbb = up.mo->getParent()->getParent();
+      if (MachineLoop *ml = loopInfo->getLoopFor(mbb)) {
+        cost += 10 * ml->getLoopDepth();
+      } else
+        cost += 1;
+    }
+    it->costToSpill = cost;
   }
 };
 }
