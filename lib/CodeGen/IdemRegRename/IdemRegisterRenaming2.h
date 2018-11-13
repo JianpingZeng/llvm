@@ -171,8 +171,7 @@ public:
                        MachineInstr *insertedPos,
                        DenseSet<unsigned> &unallocableRegs);
 
-  void choosePhysRegForRenaming(unsigned useReg,
-                                LiveIntervalIdem *interval,
+  void choosePhysRegForRenaming(LiveIntervalIdem *interval,
                                 DenseSet<unsigned> &unallocableRegs);
 
   void resolveDataflow();
@@ -180,6 +179,9 @@ public:
   void findPosAndInsertMove(MachineBasicBlock *src, MachineBasicBlock *dst);
 
   bool legalToReplace(unsigned newReg, unsigned oldReg);
+
+  bool regIsRegForRC(unsigned newReg, const TargetRegisterClass *rc);
+
   unsigned tryChooseFreeRegister(LiveIntervalIdem &interval,
                                  int useReg,
                                  BitVector &allocSet);

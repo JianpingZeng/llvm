@@ -321,6 +321,18 @@ bool IdemRegisterRenamer::legalToReplace(unsigned newReg, unsigned oldReg) {
   return false;
 }
 
+bool IdemRegisterRenamer::regIsRegForRC(unsigned newReg, const TargetRegisterClass *rc) {
+  if (newReg == 0 || TargetRegisterInfo::isVirtualRegister(newReg) ||
+      reservedRegs[newReg] || !tri->canUsedToReplace(newReg))
+    return false;
+
+  for (unsigned i = 0, e = tri->getNumRegClasses(); i < e; i++) {
+    if (tri->getRegClass(i)->contains(newReg) && rc->hasSubClassEq(tri->getRegClass(i)))
+      return true;
+  }
+  return false;
+}
+
 /*LLVM_ATTRIBUTE_UNUSED void IdemRegisterRenamer::filterUnavailableRegs(MachineOperand *use,
                                                 BitVector &allocSet,
                                                 bool allowsAntiDep) {
@@ -1233,19 +1245,32 @@ void IdemRegisterRenamer::spillCurrentUse(AntiDeps &pair,
   });
 
   li->computeCostToSpill(newInterval);
-  choosePhysRegForRenaming(pair.reg, newInterval, unallocableRegs);
+  choosePhysRegForRenaming(newInterval, unallocableRegs);
 }
 
-void IdemRegisterRenamer::choosePhysRegForRenaming(unsigned useReg,
-                                                   LiveIntervalIdem *interval,
+void IdemRegisterRenamer::choosePhysRegForRenaming(LiveIntervalIdem *interval,
                                                    DenseSet<unsigned> &unallocableRegs) {
   auto allocSet = tri->getAllocatableSet(*mf);
   auto numRegs = allocSet.size();
 
+  for (unsigned r : unallocableRegs)
+    llvm::dbgs()<<tri->getName(r)<<"\n";
+
+  llvm::dbgs()<<"\n\n";
+
+  for (size_t i = 0; i < numRegs; i++)
+    if (allocSet[i]) llvm::dbgs()<<tri->getName(i)<<"\n";
+
+  llvm::dbgs()<<"\n\n";
+
   // Remove some registers are not available when making decision of choosing.
-  for (unsigned i = 0, e = allocSet.size(); i < e; i++)
-    if (allocSet[i] && unallocableRegs.count(i))
+  for (unsigned i = 0; i < numRegs; i++)
+    if (allocSet[i] && (unallocableRegs.count(i) ||
+        !regIsRegForRC(allocSet[i], mri->getRegClass(interval->reg))))
       allocSet.reset(i);
+
+    for (size_t i = 0; i < numRegs; i++)
+      if (allocSet[i]) llvm::dbgs()<<tri->getName(i)<<"\n";
 
   // obtains a free register used for move instr.
   // choose an interval to be evicted into memory, and insert spilling code as
@@ -2175,7 +2200,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       countRegistersRaiseAntiDep(copyMI2, mbb->end(),mbb, unallocableRegs);
 
       // perform register allocation
-      choosePhysRegForRenaming(pair.reg, newInterval, unallocableRegs);
+      choosePhysRegForRenaming(newInterval, unallocableRegs);
 
       // transform the pair's uses list and defs list
       pair.uses.back() = MIOp(copyMI, 1);
@@ -2229,6 +2254,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     li->idx2MI[insertedPosId - 1] = copy;
 
     LiveIntervalIdem *interval = new LiveIntervalIdem;
+    interval->reg = vreg;
     auto from = insertedPosId - 1;
     auto to = li->getIndex(intervalEnd);
 
@@ -2249,8 +2275,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     }
 
     li->computeCostToSpill(interval);
-    choosePhysRegForRenaming(miOp.mi->getOperand(miOp.index).getReg(), interval, unallocableRegs);
-
+    choosePhysRegForRenaming(interval, unallocableRegs);
   }
   return true;
 }
@@ -2310,6 +2335,7 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   computeAntiDependenceSet();
   changed |= handleAntiDependences();
 
+  MF.dump();
   eliminatePseudoMoves();
 
   /*llvm::errs() << "After renaming2: \n";
