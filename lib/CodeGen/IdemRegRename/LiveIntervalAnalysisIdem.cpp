@@ -112,9 +112,7 @@ RangeIterator LiveIntervalIdem::intersectAt(LiveIntervalIdem *li) {
 void LiveIntervalIdem::insertRangeBefore(unsigned from, unsigned to, LiveRangeIdem *&cur) {
   assert((cur == nullptr || to <= cur->end) && "Not inserting at begining of interval");
   if (!cur) {
-    assert(!last);
-    assert(cur == first && "current node should be the first!");
-    last = cur = new LiveRangeIdem(from, to, nullptr, nullptr);
+    last = cur = new LiveRangeIdem(from, to, nullptr, last);
     return;
   }
   if (cur->start <= to) {
@@ -138,6 +136,11 @@ RangeIterator LiveIntervalIdem::upperBound(RangeIterator begin, RangeIterator en
 void LiveIntervalIdem::removeRange(unsigned from, unsigned to) {
   if (to <= beginNumber() || from >= endNumber())
     return;
+  if (from < beginNumber())
+    from = beginNumber();
+  if (to > endNumber())
+    to = endNumber();
+
   RangeIterator upper = upperBound(begin(), end(), from);
   if (upper == end())
     upper = RangeIterator(last);
@@ -145,6 +148,12 @@ void LiveIntervalIdem::removeRange(unsigned from, unsigned to) {
     --upper;
 
   assert(upper->contains(to - 1) && "LiveRangeIdem is not entirely in interval!");
+  for (auto itr = usePoints.begin(), end = usepoint_end(); itr != end; ) {
+    if (from <= itr->id && itr->id < to)
+      itr = usePoints.erase(itr);
+    else
+      ++itr;
+  }
 
   if (upper->start == from) {
     if (upper->end == to) {
@@ -163,13 +172,6 @@ void LiveIntervalIdem::removeRange(unsigned from, unsigned to) {
   upper->end = from;
   LiveRangeIdem *pos = *(++upper);
   insertRangeBefore(to, oldEnd, pos);
-
-  for (auto itr = usePoints.begin(), end = usepoint_end(); itr != end; ) {
-    if (from <= itr->id && itr->id <= to)
-      itr = usePoints.erase(itr);
-    else
-      ++itr;
-  }
 }
 
 void LiveIntervalIdem::resetStart(unsigned int usePos, unsigned int newStart) {

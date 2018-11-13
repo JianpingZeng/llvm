@@ -49,7 +49,7 @@ public:
     return start <= idx && idx <= end;
   }
   void print(llvm::raw_ostream &OS) {
-    OS<<"["<<start<<", "<<end<<"]";
+    OS<<"["<<start<<", "<<end<<")";
   }
   void dump() { print(llvm::errs()); }
 
@@ -273,8 +273,8 @@ public:
   LiveIntervalIdem *getSplitChildAtOpId(unsigned id) {
     LiveIntervalIdem *parent = getSplitParent();
     LiveIntervalIdem *result = nullptr;
-    assert(parent->hasSplitChildren());
 
+    if (!parent->hasSplitChildren()) return nullptr;
     for (auto itr = parent->splitChildren.begin(),
              end = parent->splitChildren.end(); itr != end; ++itr) {
       LiveIntervalIdem *cur = *itr;
