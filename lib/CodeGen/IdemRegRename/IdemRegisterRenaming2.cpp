@@ -1252,25 +1252,11 @@ void IdemRegisterRenamer::choosePhysRegForRenaming(LiveIntervalIdem *interval,
                                                    DenseSet<unsigned> &unallocableRegs) {
   auto allocSet = tri->getAllocatableSet(*mf);
   auto numRegs = allocSet.size();
-
-  for (unsigned r : unallocableRegs)
-    llvm::dbgs()<<tri->getName(r)<<"\n";
-
-  llvm::dbgs()<<"\n\n";
-
-  for (size_t i = 0; i < numRegs; i++)
-    if (allocSet[i]) llvm::dbgs()<<tri->getName(i)<<"\n";
-
-  llvm::dbgs()<<"\n\n";
-
   // Remove some registers are not available when making decision of choosing.
   for (unsigned i = 0; i < numRegs; i++)
     if (allocSet[i] && (unallocableRegs.count(i) ||
-        !regIsRegForRC(allocSet[i], mri->getRegClass(interval->reg))))
+        !regIsRegForRC(i, mri->getRegClass(interval->reg))))
       allocSet.reset(i);
-
-    for (size_t i = 0; i < numRegs; i++)
-      if (allocSet[i]) llvm::dbgs()<<tri->getName(i)<<"\n";
 
   // obtains a free register used for move instr.
   // choose an interval to be evicted into memory, and insert spilling code as
@@ -2243,7 +2229,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
      *
      * It will repeat the process, we should avoid that situation.
      */
-    auto miOp = pair.uses.front();
     const TargetRegisterClass *rc = tri->getMinimalPhysRegClass(pair.reg);
     unsigned vreg = mri->createVirtualRegister(rc);
 
@@ -2335,7 +2320,7 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   computeAntiDependenceSet();
   changed |= handleAntiDependences();
 
-  MF.dump();
+  // MF.dump();
   eliminatePseudoMoves();
 
   /*llvm::errs() << "After renaming2: \n";
