@@ -402,6 +402,10 @@ public:
     initializeLiveIntervalAnalysisIdemPass(*PassRegistry::getPassRegistry());
   }
 
+  virtual ~LiveIntervalAnalysisIdem() {
+    releaseMemory();
+  }
+
   const char *getPassName() const override {
     return "Live Interval computing for Register Renaming";
   }
