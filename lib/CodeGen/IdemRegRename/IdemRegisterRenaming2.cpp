@@ -2138,7 +2138,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       unsigned id = li->getIndex(lastUseMI) - 2;
       unsigned from = id + 2;
       li->mi2Idx[copyMI] = id;
-      li->idx2MI[id] = copyMI;
+      li->setIndex(id, copyMI);
 
       auto insertedPos = getNextMI(lastUseMI);
       emitRegToReg(*mbb, insertedPos, lastUseMI->getDebugLoc(), pair.reg, vreg, true);
@@ -2146,7 +2146,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       unsigned id2 = li->getIndex(lastUseMI) + 2;
       unsigned to = id2;
       li->mi2Idx[copyMI2] = id2;
-      li->idx2MI[id] = copyMI2;
+      li->setIndex(id, copyMI2);
 
       if (from > to)
         std::swap(from, to);
@@ -2242,7 +2242,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     auto copy = getPrevMI(insertedPos);
     unsigned insertedPosId = li->getIndex(insertedPos);
     li->mi2Idx[copy] = insertedPosId - 2;
-    li->idx2MI[insertedPosId - 2] = copy;
+    li->setIndex(insertedPosId - 2, copy);
 
     LiveIntervalIdem *interval = new LiveIntervalIdem;
     interval->reg = vreg;
@@ -2261,6 +2261,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     size_t e = pair.uses.size() - twoAddrInstExits;
     for (size_t k = 0; k < e; k++) {
       MachineOperand &mo = pair.uses[k].mi->getOperand(pair.uses[k].index);
+      assert(mo.getParent());
       mo.setReg(vreg);
       interval->addUsePoint(li->getIndex(mo.getParent()), &mo);
     }
@@ -2327,7 +2328,7 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   changed |= handleAntiDependences();
 
   // eliminatePseudoMoves();
-  /*llvm::errs() << "After renaming2: \n";
-  MF.dump();*/
+  llvm::errs() << "After renaming2: \n";
+  MF.dump();
   return changed;
 }

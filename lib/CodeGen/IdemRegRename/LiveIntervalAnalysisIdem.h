@@ -441,6 +441,15 @@ public:
     return mi2Idx[mi];
   }
 
+  void setIndex(unsigned index, MachineInstr *mi) {
+    assert(mi && mi2Idx.count(mi));
+    auto oldSize = idx2MI.size();
+    if (index > oldSize) {
+      idx2MI.resize(oldSize*2);
+    }
+    idx2MI[index] = mi;
+  }
+
   MachineInstr* getMachineInstr(unsigned index) {
     assert(index < idx2MI.size());
     assert(idx2MI[index]);
