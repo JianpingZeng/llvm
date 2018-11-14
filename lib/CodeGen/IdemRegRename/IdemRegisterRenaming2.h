@@ -128,9 +128,9 @@ public:
     return "Register Renaming for Idempotence pass";
   }
 
-  void clear() {
-    if (gather)
-      delete gather;
+  void releaseMemory() override {
+    /*if (gather)
+      delete gather;*/
 
     tii = nullptr;
     tri = nullptr;
@@ -143,8 +143,6 @@ public:
     antiDeps.clear();
     region2NumAntiDeps.clear();
     interval2StackSlotMap.clear();
-    if (rewriter)
-      delete rewriter;
   }
 
 public:

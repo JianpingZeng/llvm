@@ -1083,17 +1083,11 @@ unsigned IdemRegisterRenamer::getFreePhyReg(LiveIntervalIdem *interval,
     }
   }
 
-  size_t reg = 0;
-  unsigned max = tri->getNumRegs();
-  for (size_t i = 0, e = tri->getNumRegs(); i < e; i++) {
-    if (freeUntilPos[i] > max) {
-      max = freeUntilPos[i];
+  size_t reg = 1;
+  for (size_t i = 1, e = tri->getNumRegs(); i < e; i++) {
+    if (freeUntilPos[i] > freeUntilPos[reg])
       reg = i;
-    }
   }
-
-  // no available register found
-  if (!reg || max == tri->getNumRegs()) return 0;
 
   if (freeUntilPos[reg] == 0) {
     // allocation failed
@@ -2176,9 +2170,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         }
       }
 
-      llvm::dbgs()<<newInterval->usePoints.size();
       DenseSet<unsigned> unallocableRegs;
-
       for (auto r : regions) {
         MachineInstr &idem = r->getEntry();
         auto liveins = gather->getIdemLiveIns(&idem);
@@ -2335,9 +2327,7 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   changed |= handleAntiDependences();
 
   // eliminatePseudoMoves();
-
-  llvm::errs() << "After renaming2: \n";
-  MF.dump();
-  clear();
+  /*llvm::errs() << "After renaming2: \n";
+  MF.dump();*/
   return changed;
 }
