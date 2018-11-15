@@ -161,6 +161,12 @@ class LiveIntervalAnalysisIdem;
 class LiveIntervalIdem {
 public:
   unsigned reg;
+  /**
+   * This is a backup of old physical register before renaming.
+   * This field will be useful when choosing other physical register
+   * as a replacement.
+   */
+  unsigned oldReg;
   LiveRangeIdem *first;
   LiveRangeIdem *last;
   typedef std::set<UsePoint> UsePointSet;

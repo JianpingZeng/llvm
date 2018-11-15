@@ -128,7 +128,7 @@ public:
     return "Register Renaming for Idempotence pass";
   }
 
-  void releaseMemory() override {
+  void clear() {
     /*if (gather)
       delete gather;*/
 
@@ -183,7 +183,7 @@ public:
   unsigned tryChooseFreeRegister(LiveIntervalIdem &interval,
                                  int useReg,
                                  BitVector &allocSet);
-  void initializeIntervalSet();
+  void initializeIntervalSet(BitVector &allocSet);
 
   void prehandled(unsigned position);
 

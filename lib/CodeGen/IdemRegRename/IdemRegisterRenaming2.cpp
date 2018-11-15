@@ -746,16 +746,20 @@ void IdemRegisterRenamer::revisitSpilledInterval(std::vector<LiveIntervalIdem *>
 }
 #endif
 
-void IdemRegisterRenamer::initializeIntervalSet() {
+void IdemRegisterRenamer::initializeIntervalSet(BitVector &allocSet) {
   active.clear();
   inactive.clear();
   handled.clear();
   interval2AssignedRegMap.clear();
+  interval2StackSlotMap.clear();
   cur = nullptr;
   unhandled = IntervalMap();
 
   for (auto itr = li->interval_begin(), end = li->interval_end(); itr != end; ++itr) {
     assert(TargetRegisterInfo::isPhysicalRegister(itr->first));
+    // we don't consider the unallocable registers.
+    if (!allocSet[itr->first])
+      continue;
     itr->second->reg = itr->first;
     active.push_back(itr->second);
   }
@@ -972,6 +976,7 @@ void IdemRegisterRenamer::insertMove(unsigned insertedPos,
 #pragma GCC diagnostic ignored "-Wsign-compare"
 unsigned IdemRegisterRenamer::allocateBlockedRegister(LiveIntervalIdem *interval,
                                                       BitVector &allocSet) {
+  // TODO, need to refine, 11/14/2018
   auto size = tri->getNumRegs();
   unsigned *freeUntilPos = new unsigned[size];
   unsigned *blockPosBy = new unsigned[size];
@@ -1063,9 +1068,12 @@ unsigned IdemRegisterRenamer::allocateBlockedRegister(LiveIntervalIdem *interval
 
 unsigned IdemRegisterRenamer::getFreePhyReg(LiveIntervalIdem *interval,
                                             BitVector &allocSet) {
+  if (allocSet.count() == 0)
+    return 0;
+
   unsigned vreg = interval->reg;
   assert(TargetRegisterInfo::isVirtualRegister(vreg));
-  unsigned *freeUntilPos = new unsigned[tri->getNumRegs()];
+  std::map<unsigned, unsigned> freeUntilPos;
 
   for (int r = allocSet.find_first(); r != -1 ; r = allocSet.find_next(r))
     freeUntilPos[r] = UINT32_MAX;
@@ -1073,37 +1081,37 @@ unsigned IdemRegisterRenamer::getFreePhyReg(LiveIntervalIdem *interval,
   for (LiveIntervalIdem *itr : active) {
     unsigned reg = TargetRegisterInfo::isPhysicalRegister(itr->reg) ?
         itr->reg : interval2AssignedRegMap[itr];
+    assert(allocSet[reg]);
     freeUntilPos[reg] = 0;
   }
   for (LiveIntervalIdem *itr : inactive) {
     if (itr->intersects(interval)) {
       unsigned reg = TargetRegisterInfo::isPhysicalRegister(itr->reg) ?
           itr->reg : interval2AssignedRegMap[itr];
+      assert(allocSet[reg]);
       freeUntilPos[reg] = itr->intersectAt(interval)->start;
     }
   }
 
-  size_t reg = 1;
-  for (size_t i = 1, e = tri->getNumRegs(); i < e; i++) {
-    if (freeUntilPos[i] > freeUntilPos[reg])
-      reg = i;
-  }
+  int reg = -1;
+  std::for_each(freeUntilPos.begin(), freeUntilPos.end(), [&](const std::pair<unsigned, unsigned> &pair){
+    if (reg == -1 && pair.second > freeUntilPos[reg])
+      reg = pair.first;
+  });
+  assert(reg != -1);
 
   if (freeUntilPos[reg] == 0) {
     // allocation failed
-    delete[] freeUntilPos;
     return 0;
   }
   else if (freeUntilPos[reg] > interval->endNumber()) {
     // assign this reg to the current interval
-    delete[] freeUntilPos;
     return reg;
   }
   else {
     // register available for first part of current interval.
     // split current at optimal position before freePos[reg].
     unhandled.push(splitIntervalWhenPartialAvailable(interval, freeUntilPos[reg]));
-    delete[] freeUntilPos;
     return reg;
   }
 }
@@ -1230,6 +1238,7 @@ void IdemRegisterRenamer::spillCurrentUse(AntiDeps &pair,
 
   // insert a new interval for vreg, perform register allocation
   LiveIntervalIdem *newInterval = new LiveIntervalIdem;
+  newInterval->oldReg = pair.reg;
   newInterval->reg = vreg;
 
   newInterval->addRange(id-2, li->getIndex(pair.uses.back().mi) + 1);
@@ -1250,28 +1259,34 @@ void IdemRegisterRenamer::choosePhysRegForRenaming(LiveIntervalIdem *interval,
   auto allocSet = tri->getAllocatableSet(*mf);
   auto numRegs = allocSet.size();
 
-  /*llvm::dbgs()<<"\n";
-  std::for_each(unallocableRegs.begin(), unallocableRegs.end(), [&](unsigned r){
-    llvm::dbgs()<<tri->getName(r)<<",";
-  });
-  llvm::dbgs()<<"\n";*/
+  unsigned oldReg = interval->oldReg;
+  assert(oldReg && TargetRegisterInfo::isPhysicalRegister(oldReg));
+  /*if (mf->getFunction()->getName() == "flipbit") {
+    llvm::dbgs() << "unallocables: \n";
+    std::for_each(unallocableRegs.begin(), unallocableRegs.end(), [&](unsigned r) {
+      llvm::dbgs() << tri->getName(r) << ",";
+    });
+    llvm::dbgs() << "\n";
+  }*/
 
   // Remove some registers are not available when making decision of choosing.
   for (unsigned i = 0; i < numRegs; i++) {
-    if (allocSet[i] && (unallocableRegs.count(i) ||
-        !regIsRegForRC(i, mri->getRegClass(interval->reg))))
+    if (allocSet[i] && (unallocableRegs.count(i) || !legalToReplace(i, oldReg)))
       allocSet.reset(i);
   }
 
-  /*llvm::dbgs()<<"\n";
-  for (unsigned i = 0; i < numRegs; i++)
-    if (allocSet[i])
-      llvm::dbgs()<<tri->getName(i)<<",";
-  llvm::dbgs()<<"\n";*/
+  /*if (mf->getFunction()->getName() == "flipbit") {
+    llvm::dbgs() << "allocables after filter:\n";
+    for (unsigned i = 0; i < numRegs; i++)
+      if (allocSet[i])
+        llvm::dbgs() << tri->getName(i) << ",";
+    llvm::dbgs() << "\n";
+  }*/
 
   // obtains a free register used for move instr.
   // choose an interval to be evicted into memory, and insert spilling code as
   // appropriate.
+  initializeIntervalSet(allocSet);
   resolver = new MoveResolver(tri, tii, numRegs, this);
   unhandled.push(interval);
   linearScan(allocSet);
@@ -2155,6 +2170,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
 
       // create a new interval for vreg.
       LiveIntervalIdem *newInterval = new LiveIntervalIdem;
+      newInterval->oldReg = pair.reg;
       newInterval->reg = vreg;
       newInterval->addRange(from, to);
 
@@ -2245,6 +2261,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     li->setIndex(insertedPosId - 2, copy);
 
     LiveIntervalIdem *interval = new LiveIntervalIdem;
+    interval->oldReg = pair.reg;
     interval->reg = vreg;
     auto from = insertedPosId - 2;
     auto to = li->getIndex(intervalEnd);
@@ -2316,7 +2333,6 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   mfi = MF.getFrameInfo();
   reservedRegs = tri->getReservedRegs(*mf);
   m = 0;
-  initializeIntervalSet();
 
   // Collects anti-dependences operand pair.
   /*llvm::errs() << "Before renaming2: \n";
@@ -2328,7 +2344,8 @@ bool IdemRegisterRenamer::runOnMachineFunction(MachineFunction &MF) {
   changed |= handleAntiDependences();
 
   // eliminatePseudoMoves();
-  llvm::errs() << "After renaming2: \n";
-  MF.dump();
+  /*llvm::errs() << "After renaming2: \n";
+  MF.dump();*/
+  clear();
   return changed;
 }
