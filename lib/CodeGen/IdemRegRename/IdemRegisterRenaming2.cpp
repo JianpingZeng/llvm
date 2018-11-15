@@ -460,14 +460,11 @@ bool IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
       verifyLI->addUsePoint(begin->id, begin->mo);
       unsigned from, to;
       if (begin->mo->isUse()) {
-        to = li->mi2Idx[begin->mo->getParent()];
-        from = to - 1;
-        // verifyLI->fromLoad = true;
+        to = li->getIndex(begin->mo->getParent());
+        from = to - 2;
       } else {
-        from = li->mi2Idx[begin->mo->getParent()];
-        to = from + 1;
-        // Doesn't need assignment
-        // verifyLI->fromLoad = false;
+        from = li->getIndex(begin->mo->getParent());
+        to = from + 2;
       }
 
       verifyLI->addRange(from, to);
@@ -480,9 +477,6 @@ bool IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
     }
   }
 
-  /*if (buf.size() > SpilledIntervalThreshold)
-    return false;*/
-
   // Delete the targetInter from LiveIntervalAnalysisIdem
   li->removeInterval(interval);
 
@@ -490,7 +484,7 @@ bool IdemRegisterRenamer::getSpilledSubLiveInterval(LiveIntervalIdem *interval,
     MachineInstr *mi = pair.first;
     unsigned index = pair.second;
     unsigned from, to;
-    from = li->mi2Idx[mi] - 2;
+    from = li->getIndex(mi) - 2;
     to = from + 4;
     LiveIntervalIdem *verifyLI = new LiveIntervalIdem;
     for (unsigned i = 0, e = mi->getNumOperands(); i < e; i++) {
@@ -803,8 +797,8 @@ unsigned IdemRegisterRenamer::findOptimalSplitPos(LiveIntervalIdem *it,
   if (minSplitPos == maxSplitPos)
     return minSplitPos;
 
-  MachineBasicBlock *minBlock = li->getBlockAtId(minSplitPos - 1);
-  MachineBasicBlock *maxBlock = li->getBlockAtId(maxSplitPos - 1);
+  MachineBasicBlock *minBlock = li->getBlockAtId(minSplitPos);
+  MachineBasicBlock *maxBlock = li->getBlockAtId(maxSplitPos);
   if (minBlock == maxBlock)
     return maxSplitPos;
 
@@ -849,7 +843,7 @@ unsigned IdemRegisterRenamer::findOptimalSplitPos(MachineBasicBlock *minBlock,
 LiveIntervalIdem* IdemRegisterRenamer::splitBeforeUsage(LiveIntervalIdem *it,
                                                         unsigned minSplitPos,
                                                         unsigned maxSplitPos) {
-  assert(minSplitPos < maxSplitPos);
+  assert(minSplitPos <= maxSplitPos);
 
   unsigned optimalSplitPos = findOptimalSplitPos(it, minSplitPos, maxSplitPos);
   assert(minSplitPos <= optimalSplitPos && optimalSplitPos <= maxSplitPos);
@@ -977,18 +971,16 @@ void IdemRegisterRenamer::insertMove(unsigned insertedPos,
 unsigned IdemRegisterRenamer::allocateBlockedRegister(LiveIntervalIdem *interval,
                                                       BitVector &allocSet) {
   // TODO, need to refine, 11/14/2018
-  auto size = tri->getNumRegs();
-  unsigned *freeUntilPos = new unsigned[size];
-  unsigned *blockPosBy = new unsigned[size];
-
-  for (int reg = allocSet.find_first(); reg != -1; reg = allocSet.find_next(reg)) {
+  std::map<unsigned, unsigned> freeUntilPos, blockPosBy;
+  for (int reg = allocSet.find_first(); reg != -1 ; reg = allocSet.find_next(reg)) {
     freeUntilPos[reg] = UINT32_MAX;
     blockPosBy[reg] = UINT32_MAX;
   }
 
   for (LiveIntervalIdem *itr : active) {
     if (TargetRegisterInfo::isVirtualRegister(itr->reg))
-      freeUntilPos[interval2AssignedRegMap[itr]] = interval->getUsePointAfter(interval->beginNumber());
+      freeUntilPos[interval2AssignedRegMap[itr]] =
+          interval->getUsePointAfter(interval->beginNumber());
     else
       blockPosBy[itr->reg] = 0;
   }
@@ -1003,16 +995,13 @@ unsigned IdemRegisterRenamer::allocateBlockedRegister(LiveIntervalIdem *interval
       freeUntilPos[itr->reg] = interval->getUsePointAfter(interval->beginNumber());
   }
 
-  unsigned reg = 0, max = 0;
-  for (unsigned i = 0; i < size; i++) {
-    if (freeUntilPos[i] > max) {
-      max = freeUntilPos[i];
-      reg = i;
-    }
-  }
+  int reg = -1;
+  std::for_each(freeUntilPos.begin(), freeUntilPos.end(), [&](const std::pair<unsigned, unsigned> &pair) {
+    if (reg == -1 || pair.second > freeUntilPos[reg])
+      reg = pair.first;
+  });
 
-  assert(reg && max);
-
+  assert(reg != -1);
   int firstUseOfCur = interval->getFirstUse();
   if (freeUntilPos[reg] <= firstUseOfCur) {
     // all active and inactive interval are used before first use of current interval.
@@ -1021,8 +1010,6 @@ unsigned IdemRegisterRenamer::allocateBlockedRegister(LiveIntervalIdem *interval
     LiveIntervalIdem *splitedChild = splitBeforeUsage(interval, freeUntilPos[reg] + 1, firstUseOfCur);
     unhandled.push(splitedChild);
 
-    delete[] freeUntilPos;
-    delete[] blockPosBy;
     // Return 0 indicates we can't allocate the current interval with a register
     return 0;
   }
@@ -1059,9 +1046,6 @@ unsigned IdemRegisterRenamer::allocateBlockedRegister(LiveIntervalIdem *interval
       splitAndSpill(*itr, interval->beginNumber(), interval->endNumber(), false);
     }
   }
-
-  delete[] freeUntilPos;
-  delete[] blockPosBy;
   return reg;
 }
 #pragma GCC diagnostic pop
@@ -1095,7 +1079,7 @@ unsigned IdemRegisterRenamer::getFreePhyReg(LiveIntervalIdem *interval,
 
   int reg = -1;
   std::for_each(freeUntilPos.begin(), freeUntilPos.end(), [&](const std::pair<unsigned, unsigned> &pair){
-    if (reg == -1 && pair.second > freeUntilPos[reg])
+    if (reg == -1 || pair.second > freeUntilPos[reg])
       reg = pair.first;
   });
   assert(reg != -1);
@@ -1216,15 +1200,15 @@ void IdemRegisterRenamer::spillCurrentUse(AntiDeps &pair,
   tii->storeRegToStackSlot(*mbb, insertedPos, vreg, true, slotIndex, rc, tri);
   auto st = getPrevMI(insertedPos);
   unsigned id = li->getIndex(insertedPos);
-  li->mi2Idx[st] = id - 1;
+  li->setIndex(id - 2, st);
   auto copyMI = getPrevMI(st);
-  li->mi2Idx[copyMI] = id - 2;
+  li->setIndex(id - 4, copyMI);
 
   // insert a load instruction right before the use first
   tii->loadRegFromStackSlot(*mbb, useMO.mi, vreg, slotIndex, rc, tri);
   auto ld = getPrevMI(useMO.mi);
-  unsigned ldId = li->getIndex(useMO.mi) - 1;
-  li->mi2Idx[ld] = ldId;
+  unsigned ldId = li->getIndex(useMO.mi) - 2;
+  li->setIndex(ldId, ld);
   // replace all references to pair.use with the vreg
   std::for_each(pair.uses.begin(), pair.uses.end(), [&](MIOp &op) {
     op.mi->getOperand(op.index).setReg(vreg);
@@ -1327,8 +1311,8 @@ void IdemRegisterRenamer::resolveDataflow() {
           assert(parent);
           parent = parent->getSplitParent();
 
-          LiveIntervalIdem *srcIt = parent->getSplitChildAtOpId(li->mi2Idx[&mbb.back()]);
-          LiveIntervalIdem *dstIt = parent->getSplitChildAtOpId(li->mi2Idx[&succBB->front()]);
+          LiveIntervalIdem *srcIt = parent->getSplitChildAtOpId(li->getIndex(&mbb.back()));
+          LiveIntervalIdem *dstIt = parent->getSplitChildAtOpId(li->getIndex(&succBB->front()));
           if (srcIt && dstIt && srcIt != dstIt)
             resolver->addMapping(srcIt, dstIt);
         }
@@ -1696,6 +1680,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
 
     bool useOverlapped = useMO.mi->getOperand(useMO.index).getReg() != pair.reg;
     bool defOverlapped = !partialEquals(defMO.mi->getOperand(defMO.index).getReg(), pair.reg);
+    // FIXME, 11/15/2018, try to reduce redundant inserted move instruction along different paths
     if (useOverlapped) {
       //======================================================================================= //
       // Handle the case that uses of different anti-dependence overlap
@@ -1734,7 +1719,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
             }
             tii->copyPhysReg(*pos2->mi->getParent(), insertedPos, DebugLoc(), destReg, pair.reg, true);
             auto copyMI = getPrevMI(insertedPos);
-            li->mi2Idx[copyMI] = li->getIndex(pos2->mi) + 1;
+            li->setIndex(li->getIndex(pos2->mi) + 2, copyMI);
             pair.uses.emplace_back(copyMI, 1);
           }
           else if (prev->getOperand(1).getReg() == pair.reg) {
@@ -1900,7 +1885,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
             }
             tii->copyPhysReg(*pos2->mi->getParent(), insertedPos, DebugLoc(), destReg, pair.reg, true);
             auto copyMI = getPrevMI(insertedPos);
-            li->mi2Idx[copyMI] = li->getIndex(pos2->mi) + 1;
+            li->setIndex(li->getIndex(pos2->mi) + 2, copyMI);
             pair.uses.emplace_back(copyMI, 1);
           }
           else if (prev->getOperand(1).getReg() == pair.reg) {
@@ -1950,7 +1935,7 @@ bool IdemRegisterRenamer::handleAntiDependences() {
         tii->copyPhysReg(*pos->mi->getParent(), insertedPos, DebugLoc(), destReg, srcReg, true);
         auto mov = getPrevMI(insertedPos);
         unsigned index = li->getIndex(itr)-2;
-        li->mi2Idx[mov] = index;
+        li->setIndex(index, mov);
 
         ++pos2;
         pair.uses.erase(pos, pair.uses.end());
@@ -1980,12 +1965,12 @@ bool IdemRegisterRenamer::handleAntiDependences() {
 
     auto saved = miLastDef.mi;
     std::set<MachineBasicBlock *> visited;
+    canReplace &= !twoAddrInstExits;
     if (canReplace)
       willRenameCauseOtherAntiDep(++saved, miLastDef.mi->getParent()->end(),
                                   miLastDef.mi->getParent(), pair.reg, visited, canReplace);
 
     // If the current reg is used in ret instr, we can't replace it.
-    canReplace &= !twoAddrInstExits;
     if (canReplace) {
       // We don't replace the name of R0 in ARM and x86 architecture.
       // Because R0 is implicitly used by return instr.
@@ -2152,7 +2137,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       auto copyMI = getPrevMI(lastUseMI);
       unsigned id = li->getIndex(lastUseMI) - 2;
       unsigned from = id + 2;
-      li->mi2Idx[copyMI] = id;
       li->setIndex(id, copyMI);
 
       auto insertedPos = getNextMI(lastUseMI);
@@ -2160,7 +2144,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
       auto copyMI2 = getPrevMI(insertedPos);
       unsigned id2 = li->getIndex(lastUseMI) + 2;
       unsigned to = id2;
-      li->mi2Idx[copyMI2] = id2;
       li->setIndex(id, copyMI2);
 
       if (from > to)
@@ -2257,7 +2240,6 @@ bool IdemRegisterRenamer::handleAntiDependences() {
     emitRegToReg(*insertedPos->getParent(), insertedPos, DebugLoc(), vreg, pair.reg, true);
     auto copy = getPrevMI(insertedPos);
     unsigned insertedPosId = li->getIndex(insertedPos);
-    li->mi2Idx[copy] = insertedPosId - 2;
     li->setIndex(insertedPosId - 2, copy);
 
     LiveIntervalIdem *interval = new LiveIntervalIdem;

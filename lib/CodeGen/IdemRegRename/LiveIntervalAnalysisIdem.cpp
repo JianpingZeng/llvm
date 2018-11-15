@@ -262,15 +262,11 @@ unsigned LiveIntervalIdem::getUsePointAfter(unsigned int pos) {
 unsigned LiveIntervalIdem::getUsePointBefore(unsigned pos) {
   assert(pos >= beginNumber());
 
-  UsePoint *up = nullptr;
-  for (auto itr : usePoints) {
-    if (itr.id <= pos) {
-      if (!up || itr.id > up->id)
-        up = &itr;
-    }
+  for (auto itr = usePoints.rbegin(), end = usePoints.rend(); itr != end; ++itr) {
+    if (itr->id < pos)
+      return itr->id;
   }
-  assert(up);
-  return up->id;
+  return pos - 1;
 }
 
 char LiveIntervalAnalysisIdem::ID = 0;
@@ -315,7 +311,6 @@ void LiveIntervalAnalysisIdem::numberMachineInstr(std::vector<MachineBasicBlock 
 
   idx2MI.clear();
   mi2Idx.clear();
-  idx2MI.resize(totalMIs + 1);
 
   // starts from 4 in the case of we will insert a interval before first instr.
   unsigned index = NUM;
@@ -324,7 +319,7 @@ void LiveIntervalAnalysisIdem::numberMachineInstr(std::vector<MachineBasicBlock 
     auto end = mbb->instr_end();
     for (; mi != end; ++mi) {
       mi2Idx[&*mi] = index;
-      idx2MI[index / NUM] = &*mi;
+      idx2MI[index] = &*mi;
       index += NUM;
     }
   }
@@ -655,6 +650,7 @@ void LiveIntervalAnalysisIdem::buildIntervalForRegister(unsigned reg,
 LiveIntervalIdem* LiveIntervalAnalysisIdem::split(unsigned splitPos, LiveIntervalIdem *it) {
   LiveIntervalIdem *child = new LiveIntervalIdem;
   child->reg = it->reg;
+  child->oldReg = it->oldReg;
   child->splitParent = it->getSplitParent();
   it->getSplitParent()->splitChildren.push_back(child);
 
@@ -674,6 +670,11 @@ LiveIntervalIdem* LiveIntervalAnalysisIdem::split(unsigned splitPos, LiveInterva
      * cur.from      cur.to
      */
     child->first = new LiveRangeIdem(splitPos, cur->end, cur->next, nullptr);
+    if (it->last == cur)
+      child->last = child->first;
+    else
+      child->last = it->last;
+
     cur->end = splitPos;
     cur->next = nullptr;
     it->last = cur;
@@ -689,6 +690,12 @@ LiveIntervalIdem* LiveIntervalAnalysisIdem::split(unsigned splitPos, LiveInterva
      */
     child->first = cur;
     cur->prev  = nullptr;
+
+    if (it->last == cur)
+      child->last = cur;
+    else
+      child->last = it->last;
+
     assert(prev && "Split position before begin number!");
 
     prev->next = nullptr;
@@ -703,7 +710,8 @@ LiveIntervalIdem* LiveIntervalAnalysisIdem::split(unsigned splitPos, LiveInterva
     if (up.id >= splitPos) {
       childUsePoints.insert(up);
       itr = it->usePoints.erase(itr);
-    }
+    } else
+      ++itr;
   }
   child->usePoints = childUsePoints;
   return child;

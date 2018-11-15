@@ -19,7 +19,7 @@ enum {
   USE,
   DEF,
   STORE,
-  NUM = 4
+  NUM = 8
 };
 
 // forward declaration.
@@ -345,7 +345,7 @@ public:
   /**
    * Map from instruction slot to corresponding machine instruction.
    */
-  std::vector<MachineInstr*> idx2MI;
+  std::map<unsigned, MachineInstr*> idx2MI;
   /**
    * Map from machine instruction to it's number.
    */
@@ -437,9 +437,13 @@ public:
   bool runOnMachineFunction(MachineFunction &MF) override;
 
   MachineBasicBlock *getBlockAtId(unsigned pos) {
-    auto mi = getMachineInstr(pos);
-    assert(mi);
-    return mi->getParent();
+    for (const MachineBasicBlock &mbb : *mf) {
+      unsigned from = getIndex(const_cast<MachineInstr*>(&mbb.front()));
+      unsigned to = getIndex(const_cast<MachineInstr*>(&mbb.back()));
+      if (from <= pos && pos < to + NUM)
+        return const_cast<MachineBasicBlock *>(&mbb);
+    }
+    return nullptr;
   }
 
   unsigned getIndex(MachineInstr *mi) {
@@ -448,17 +452,13 @@ public:
   }
 
   void setIndex(unsigned index, MachineInstr *mi) {
-    assert(mi && mi2Idx.count(mi));
-    auto oldSize = idx2MI.size();
-    if (index > oldSize) {
-      idx2MI.resize(oldSize*2);
-    }
+    assert(mi);
+    mi2Idx[mi] = index;
     idx2MI[index] = mi;
   }
 
   MachineInstr* getMachineInstr(unsigned index) {
-    assert(index < idx2MI.size());
-    assert(idx2MI[index]);
+    assert(idx2MI.count(index));
     return idx2MI[index];
   }
 
