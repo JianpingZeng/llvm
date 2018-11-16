@@ -1451,6 +1451,13 @@ void IdemRegisterRenamer::spillCurrentUse(AntiDeps &pair) {
   tii->loadRegFromStackSlot(*pos->getParent(), pos, pair.reg, slotFI, rc, tri);
   auto ld = getPrevMI(pos);
   li->mi2Idx[ld] = li->getIndex(pos) - 1;
+
+  // insert a store after the first def.
+  auto firstDef = pair.defs.front().mi;
+  pos = getNextMI(firstDef);
+  tii->storeRegToStackSlot(*firstDef->getParent(), pos, pair.reg, true, slotFI, rc, tri);
+  auto st = getNextMI(firstDef);
+  li->mi2Idx[st] = li->getIndex(firstDef) + 1;
 }
 
 unsigned IdemRegisterRenamer::choosePhysRegForRenaming(MachineOperand *use,
