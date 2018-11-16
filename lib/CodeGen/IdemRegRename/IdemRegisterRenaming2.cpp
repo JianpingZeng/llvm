@@ -1186,56 +1186,64 @@ static void findAllReachableDefs(MachineBasicBlock::reverse_iterator begin,
 void IdemRegisterRenamer::spillCurrentUse(AntiDeps &pair,
                                           MachineInstr *insertedPos,
                                           DenseSet<unsigned> &unallocableRegs) {
-  assert(insertedPos && "Insertion position should not be null");
+  // spill indicates if we have to spill current useMO when
+  // tehre is no other free or blocked register available.
   auto useMO = pair.uses.front();
+
+  // Program reach here indicates we can't find any free or blocked register to be used as
+  // inserting move instruction.
+  std::vector<MachineInstr*> defs;
+  std::set<MachineBasicBlock*> visited;
+  findAllReachableDefs(MachineBasicBlock::reverse_iterator(useMO.mi),
+                       useMO.mi->getParent()->rend(),
+                       useMO.mi->getParent(),
+                       pair.reg, defs, visited);
+
+  int slotFI = 0;
   const TargetRegisterClass *rc = tri->getMinimalPhysRegClass(pair.reg);
-  unsigned vreg = mri->createVirtualRegister(rc);
-  MachineBasicBlock *mbb = insertedPos->getParent();
+  slotFI = mfi->CreateSpillStackObject(rc->getSize(), rc->getAlignment());
+  if (!defs.empty()) {
+    for (auto &def : defs) {
+      assert(def != def->getParent()->end());
+      auto pos = ++MachineBasicBlock::iterator(def);
+      tii->storeRegToStackSlot(*def->getParent(), pos, pair.reg, true, slotFI, rc, tri);
+      auto st = getNextMI(def);
+      li->setIndex(li->getIndex(def) + 2, st);
+    }
+  }
+  else {
+    // The reg must be the live in of entry block of the function.
+    assert(mf->front().isLiveIn(pair.reg));
+    MachineBasicBlock::iterator pos = mf->front().begin();
+    for (auto end = mf->front().end(); pos != end && !tii->isIdemBoundary(pos); ++pos) {}
+    if (!tii->isIdemBoundary(pos)) {
+      pos = mf->front().begin();
+    }
+    tii->storeRegToStackSlot(mf->front(), pos, pair.reg, true, slotFI, rc, tri);
+    auto st = getPrevMI(pos);
+    li->setIndex(li->getIndex(pos) - 2, st);
+  }
 
-  // insert following instruction sequence right before insertedPos
-  // 1. vreg = pair.reg
-  // 2. str vreg, #FI
-  emitRegToReg(*mbb, insertedPos, DebugLoc(), vreg, pair.reg, true);
-  int slotIndex = mfi->CreateSpillStackObject(rc->getSize(), rc->getAlignment());
-  tii->storeRegToStackSlot(*mbb, insertedPos, vreg, true, slotIndex, rc, tri);
-  auto st = getPrevMI(insertedPos);
-  unsigned id = li->getIndex(insertedPos);
-  li->setIndex(id - 2, st);
-  auto copyMI = getPrevMI(st);
-  li->setIndex(id - 4, copyMI);
+  // Insert a load instruction before the first use.
+  auto pos = useMO.mi;
+  tii->loadRegFromStackSlot(*pos->getParent(), pos, pair.reg, slotFI, rc, tri);
+  auto ld = getPrevMI(pos);
+  li->setIndex(li->getIndex(pos) - 2, ld);
 
-  // insert a load instruction right before the use first
-  tii->loadRegFromStackSlot(*mbb, useMO.mi, vreg, slotIndex, rc, tri);
-  auto ld = getPrevMI(useMO.mi);
-  unsigned ldId = li->getIndex(useMO.mi) - 2;
-  li->setIndex(ldId, ld);
-  // replace all references to pair.use with the vreg
-  std::for_each(pair.uses.begin(), pair.uses.end(), [&](MIOp &op) {
-    op.mi->getOperand(op.index).setReg(vreg);
-  });
+  // Insert a store after the first def
+  assert(!pair.defs.empty());
+  const MIOp &firstDef = pair.defs.front();
+  MachineBasicBlock::iterator insertPos;
+  MachineBasicBlock *mbb = firstDef.mi->getParent();
+  if (firstDef.mi == mbb->back())
+    insertPos = mbb->end();
+  else
+    insertPos = getNextMI(firstDef.mi);
 
-
-  // remove some interval part for pair.reg
-  LiveIntervalIdem *interval = li->intervals[pair.reg];
-  assert(interval);
-  interval->removeRange(id-1, li->getIndex(pair.uses.back().mi) + 1);
-
-  // insert a new interval for vreg, perform register allocation
-  LiveIntervalIdem *newInterval = new LiveIntervalIdem;
-  newInterval->oldReg = pair.reg;
-  newInterval->reg = vreg;
-
-  newInterval->addRange(id-2, li->getIndex(pair.uses.back().mi) + 1);
-  newInterval->addUsePoint(id-2, &copyMI->getOperand(0));
-  newInterval->addUsePoint(id-1, &st->getOperand(0));
-  newInterval->addUsePoint(ldId, &ld->getOperand(0));
-
-  std::for_each(pair.uses.begin(), pair.uses.end(), [&](MIOp &op) {
-    newInterval->addUsePoint(li->getIndex(op.mi), &op.mi->getOperand(op.index));
-  });
-
-  li->computeCostToSpill(newInterval);
-  choosePhysRegForRenaming(newInterval, unallocableRegs);
+  // Insert store instruction at the position right before insertPos
+  tii->storeRegToStackSlot(*mbb, insertPos, pair.reg, true, slotFI, rc, tri);
+  auto st = getNextMI(firstDef.mi);
+  li->setIndex(li->getIndex(firstDef.mi) + 2, st);
 }
 
 void IdemRegisterRenamer::choosePhysRegForRenaming(LiveIntervalIdem *interval,
